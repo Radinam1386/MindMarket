@@ -5,8 +5,9 @@ __pycache__/
 .pytest_cache/
 
 # local data & artifacts (never commit market data or secrets)
-data/
-logs/
+# root-anchored: must NOT ignore src/marketmind/data (a real code package)
+/data/
+/logs/
 *.log
 
 # secrets — must never exist, but guard anyway
