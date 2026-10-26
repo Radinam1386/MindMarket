@@ -1,0 +1,17 @@
+# environments
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# local data & artifacts (never commit market data or secrets)
+data/
+logs/
+*.log
+
+# secrets — must never exist, but guard anyway
+*.env
+.env.*
+*apikey*
+*api_key*
+data/secrets/

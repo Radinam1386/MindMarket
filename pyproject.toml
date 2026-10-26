@@ -1,0 +1,24 @@
+[project]
+name = "marketmind"
+version = "0.1.0"
+description = "MarketMind AI — quantitative research & leveraged trading system for Wallex margin markets"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pyarrow>=16",
+    "scipy>=1.13",
+    "statsmodels>=0.14",
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/marketmind"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
