@@ -12,13 +12,14 @@ Decision policy (LLM advises inside a hard envelope):
 """
 from __future__ import annotations
 
+import os
 import time
 import traceback
 
 import pandas as pd
 
 from .. import events
-from ..backtest.strategies import donchian_er
+from ..backtest.strategies import donchian_er, efficiency_ratio
 from ..config import (
     MARGIN_LIQ_FRAC,
     MARGIN_LIQ_OFFSET,
@@ -48,6 +49,22 @@ PAPER_CFG = {
     "sma_n": 200,
     "use_llm": True,
 }
+
+
+# Server activity tuning via env (research defaults stay intact without them).
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ[name])
+    except (KeyError, TypeError, ValueError):
+        return default
+
+
+PAPER_CFG["er_min"] = _env_float("MARKETMIND_ER_MIN", PAPER_CFG["er_min"])
+PAPER_CFG["llm_confidence_min"] = _env_float("MARKETMIND_LLM_CONF_MIN",
+                                             PAPER_CFG["llm_confidence_min"])
+PAPER_CFG["max_positions"] = int(_env_float("MARKETMIND_MAX_POSITIONS",
+                                            PAPER_CFG["max_positions"]))
+PAPER_CFG["cycle_interval_min"] = max(1.0, _env_float("MARKETMIND_CYCLE_MINUTES", 15.0))
 
 
 SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
@@ -82,13 +99,22 @@ def exit_fill(q: dict) -> float:
     return q["bid"] * (1 - SLIPPAGE) if q["bid"] else q["mid"]
 
 
+REFRESH_SPANS = {"1D": 400 * 86400, "240": 45 * 86400, "60": 4 * 86400}
+
+
 def refresh_candles(client: WallexPublicClient) -> dict[str, pd.DataFrame]:
-    frames = {}
-    for sym in ASSETS:
-        df = ingest.backfill(client, sym, "1D",
-                             start_ts=int(time.time()) - 400 * 86400)
-        _, merged = ingest.save_candles(df, sym, "1D")
-        frames[sym] = merged
+    """Always-fresh candles: 1D (signals) + 4h/1h (charts), incl. USDTTMN (premium)."""
+    frames: dict[str, pd.DataFrame] = {}
+    for sym in ASSETS + ["USDTTMN"]:
+        for res, span in REFRESH_SPANS.items():
+            try:
+                df = ingest.backfill(client, sym, res,
+                                     start_ts=int(time.time()) - span)
+                _, merged = ingest.save_candles(df, sym, res)
+                if res == "1D" and sym in ASSETS:
+                    frames[sym] = merged
+            except Exception as e:
+                events.record("warn", "data", f"{sym} {res}: به‌روزرسانی کندل ناموفق: {e}")
     return frames
 
 
@@ -158,6 +184,14 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         sig = donchian_er(df, entry_n=PAPER_CFG["entry_n"], exit_n=PAPER_CFG["exit_n"],
                           er_n=PAPER_CFG["er_n"], er_min=PAPER_CFG["er_min"],
                           sma_n=PAPER_CFG["sma_n"])
+        close_daily = float(df["close"].iloc[-1])
+        er_now = efficiency_ratio(df["close"], PAPER_CFG["er_n"]).iloc[-1]
+        sma200_now = float(df["close"].rolling(PAPER_CFG["sma_n"]).mean().shift(1).iloc[-1])
+        upper_prev = float(df["high"].rolling(PAPER_CFG["entry_n"]).max().shift(1).iloc[-1])
+        gate_detail = {"er": (round(float(er_now), 3) if er_now == er_now else None),
+                       "er_min": PAPER_CFG["er_min"],
+                       "above_sma200": bool(close_daily > sma200_now),
+                       "breakout": bool(close_daily > upper_prev)}
         try:
             quote = live_quote(client, sym)
         except Exception as e:
@@ -290,7 +324,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                         opened.append(f"🤖 {sym} open(LLM) @{px:.4g} coll {coll:.1f}$ "
                                       f"conf {opinion['confidence']:.0%}")
             else:
-                state.record_decision(conn, sym, "hold", {"px": px, "note": "no signal"})
+                state.record_decision(conn, sym, "hold",
+                                      {"px": px, "note": "no signal", **gate_detail})
         else:
             held.append(sym)
             state.record_decision(conn, sym, "hold",

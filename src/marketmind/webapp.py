@@ -83,22 +83,37 @@ def _boot() -> None:
         return
 
     def cycle_loop() -> None:
+        """Continuous paper-trading loop — master switch = settings.auto_trade.
+
+        ON  → full cycle (candle refresh + decisions + paper orders) every
+              PAPER_CFG['cycle_interval_min'] minutes, until switched off.
+        OFF → no automatic cycles (the manual ▶ button still works)."""
         import time as _t
 
-        while True:
-            now = _t.time()
-            next_run = (int(now) // 86400 + 1) * 86400 + 3600  # next 01:00 UTC = 04:30 Tehran
-            _t.sleep(max(5.0, next_run - now))
-            try:
-                from . import notify
-                from .paper import runner
+        from .paper import runner
 
-                runner.run_cycle(notify=notify.send)
-                _cache["signals_ts"] = 0.0
+        while True:
+            try:
+                conn = state.connect()
+                auto = state.get_setting(conn, "auto_trade", "0") == "1"
+                last = int(state.get_setting(conn, "last_auto_cycle", "0") or 0)
+                conn.close()
+                interval = int(runner.PAPER_CFG.get("cycle_interval_min", 15) * 60)
+                if auto and int(_t.time()) - last >= interval:
+                    from . import notify
+
+                    res = runner.run_cycle(notify=notify.send, force=True)
+                    conn = state.connect()
+                    state.set_setting(conn, "last_auto_cycle", str(int(_t.time())))
+                    conn.close()
+                    _cache["signals_ts"] = 0.0
+                    lines = " · ".join((res.get("lines") or [])[:4])
+                    events.record("info", "scheduler",
+                                  f"چرخهٔ پیوسته تمام شد: {lines[:300]}")
             except Exception as e:  # scheduler must never die
-                events.record("error", "scheduler", f"چرخهٔ روزانهٔ خودکار شکست خورد: {e}",
+                events.record("error", "scheduler", f"چرخهٔ پیوسته شکست خورد: {e}",
                               traceback.format_exc()[-1200:])
-                continue
+            _t.sleep(30)
 
     threading.Thread(target=cycle_loop, daemon=True, name="mm-scheduler").start()
 
@@ -302,6 +317,39 @@ def api_logs():
     return JSONResponse({"events": events.recent(150)})
 
 
+@app.get("/api/autotrade")
+def api_autotrade_status():
+    from .paper import runner
+
+    conn = state.connect()
+    on = state.get_setting(conn, "auto_trade", "0") == "1"
+    last = int(state.get_setting(conn, "last_auto_cycle", "0") or 0)
+    conn.close()
+    return JSONResponse({"on": on,
+                         "interval_min": runner.PAPER_CFG.get("cycle_interval_min", 15),
+                         "last_cycle_ts": last,
+                         "er_min": runner.PAPER_CFG["er_min"],
+                         "llm_confidence_min": runner.PAPER_CFG["llm_confidence_min"],
+                         "max_positions": runner.PAPER_CFG["max_positions"]})
+
+
+@app.post("/api/autotrade")
+async def api_autotrade_toggle(request: Request):
+    from .paper import runner
+
+    body = await request.json()
+    on = bool(body.get("on"))
+    conn = state.connect()
+    state.set_setting(conn, "auto_trade", "1" if on else "0")
+    conn.close()
+    if on:
+        events.record("info", "scheduler",
+                      f"معامله‌گری پیوسته روشن شد — هر {runner.PAPER_CFG.get('cycle_interval_min', 15):.0f} دقیقه بررسی و معامله")
+    else:
+        events.record("warn", "scheduler", "معامله‌گری پیوسته خاموش شد (دستی توسط کاربر)")
+    return JSONResponse({"on": on})
+
+
 @app.post("/api/run")
 def api_run():
     from . import notify
@@ -366,6 +414,7 @@ def api_state():
     analyst_rows = [dict(r) for r in conn.execute(
         "SELECT * FROM analyst WHERE id IN (SELECT MAX(id) FROM analyst GROUP BY symbol)")]
     halted = state.get_setting(conn, "halted", "0") == "1"
+    auto_trade = state.get_setting(conn, "auto_trade", "0") == "1"
     peak = state.peak_equity(conn)
     conn.close()
 
@@ -382,6 +431,7 @@ def api_state():
     return JSONResponse({
         "cash": cash, "positions": positions, "trades": trades, "decisions": decisions,
         "equity": equity, "analyst": analyst_rows, "halted": halted,
+        "auto_trade": auto_trade,
         "stats_all": stats(trades),
         "stats_signal": stats([t for t in trades if "llm_conviction" not in (t["meta"] or "")]),
         "stats_llm": stats([t for t in trades if "llm_conviction" in (t["meta"] or "")]),
@@ -535,6 +585,7 @@ async function ovFill(){
   <div class="card"><h3>🎛 کنترل</h3>
    <button onclick="doRun()">▶ اجرای چرخهٔ الان</button>
    <button class="warn" onclick="doHalt()">${d.halted?'▶ ادامه':'⛔ توقف'}</button>
+   <button class="ghost" onclick="doAuto()">🔁 پیوسته: ${d.auto_trade?'روشن ✓':'خاموش'}</button>
    <div style="margin-top:12px;font-size:12px;color:var(--dim)">
    آخرین تصمیم: ${d.decisions.length?faT(d.decisions[0].ts):'—'}<br>
    برد قانون: <b>${d.stats_signal.win||0}%</b> · انتظاری ${sgn(d.stats_signal.exp)}% ·
@@ -810,6 +861,11 @@ async function doRun(){
 async function doHalt(){const s=await jget('/api/settings');
  await fetch(s.halted?'/api/resume':'/api/halt',{method:'POST'});
  toast(s.halted?'ادامه یافت':'متوقف شد');render()}
+async function doAuto(){
+ const s=await jget('/api/autotrade');
+ await fetch('/api/autotrade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:!s.on})});
+ toast(!s.on?('معاملهٔ پیوسته روشن شد — هر '+Math.round(s.interval_min)+' دقیقه بررسی و معامله'):'معاملهٔ پیوسته خاموش شد');
+ render()}
 async function notifyTest(){const r=await (await fetch('/api/notify-test',{method:'POST'})).json();
  toast(r.sent?'پیام تلگرام ارسال شد ✓':'ارسال نشد — تنظیمات/شبکه را چک کن')}
 /* ---------------- boot ---------------- */
