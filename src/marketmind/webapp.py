@@ -18,10 +18,12 @@ import hmac
 import json
 import threading
 import time
+import traceback
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from . import events
 from .config import CANDLES_DIR, DATA_DIR, REPORTS_DIR, RESOLUTIONS
 from .paper import state
 
@@ -93,8 +95,10 @@ def _boot() -> None:
 
                 runner.run_cycle(notify=notify.send)
                 _cache["signals_ts"] = 0.0
-            except Exception:
-                continue  # scheduler must never die
+            except Exception as e:  # scheduler must never die
+                events.record("error", "scheduler", f"چرخهٔ روزانهٔ خودکار شکست خورد: {e}",
+                              traceback.format_exc()[-1200:])
+                continue
 
     threading.Thread(target=cycle_loop, daemon=True, name="mm-scheduler").start()
 
@@ -292,17 +296,35 @@ def api_settings():
     })
 
 
+@app.get("/api/logs")
+def api_logs():
+    """Latest system events (cycle starts/errors, HALT blocks, LLM failures)."""
+    return JSONResponse({"events": events.recent(150)})
+
+
 @app.post("/api/run")
 def api_run():
     from . import notify
     from .paper import runner
+    conn = state.connect()
+    halted = state.get_setting(conn, "halted", "0") == "1"
+    conn.close()
+    if halted:
+        events.record("warn", "cycle", "درخواست اجرای چرخه رد شد: حساب HALTED است")
+        return JSONResponse({"started": False,
+                             "why": "⛔ حساب متوقف (HALT) است — اول دکمهٔ «▶ ادامه» را بزن"})
     if not _run_lock.acquire(blocking=False):
-        return JSONResponse({"started": False, "why": "a cycle is already running"})
+        return JSONResponse({"started": False, "why": "یک چرخه همین حالا در حال اجراست"})
 
     def go():
         try:
-            runner.run_cycle(notify=notify.send, force=True)
+            res = runner.run_cycle(notify=notify.send, force=True)
             _cache["signals_ts"] = 0.0  # refresh analyst/signal cache
+            events.record("info", "cycle", "چرخهٔ دستی تمام شد: "
+                          + " · ".join((res.get("lines") or [])[:8])[:800])
+        except Exception as e:
+            events.record("error", "cycle", f"چرخهٔ دستی شکست خورد: {e}",
+                          traceback.format_exc()[-1500:])
         finally:
             _run_lock.release()
 
@@ -449,6 +471,7 @@ a.cl{color:var(--info);text-decoration:none}
  <a href="#/markets" data-p="markets">📊 بازارها</a>
  <a href="#/research" data-p="research">🔬 تحقیق</a>
  <a href="#/settings" data-p="settings">⚙️ تنظیمات</a>
+ <a href="#/logs" data-p="logs">📜 لاگ</a>
  <span class="nav-sec" id="livets">—</span>
 </nav>
 <div id="app"></div>
@@ -473,7 +496,7 @@ async function refreshLive(){
      Math.round((Date.now()/1000-MK.ts))+' ثانیه پیش';}catch(e){}
 }
 /* ---------------- router ---------------- */
-const routes={overview:pgOverview,markets:pgMarkets,research:pgResearch,settings:pgSettings,coin:pgCoin};
+const routes={overview:pgOverview,markets:pgMarkets,research:pgResearch,settings:pgSettings,coin:pgCoin,logs:pgLogs};
 let curRes='1D';
 window.onhashchange=render;
 function render(){
@@ -715,6 +738,27 @@ function drawCandles(d){
   const i=Math.floor((x-padL)/bw);if(i>=0&&i<n){const k=cs[i];
    c.title=`${faD(k.ts)}\nO:${k.open} H:${k.high} L:${k.low} C:${k.close} V:${Math.round(k.volume)}`;}};
 }
+/* ---------------- logs ---------------- */
+const lvlChip=(l)=>l==='error'?'<span class="chip c-bear">خطا</span>':l==='warn'?'<span class="chip c-amb">هشدار</span>':'<span class="chip c-neut">رویداد</span>';
+async function pgLogs(){
+ const app=document.getElementById('app');
+ app.innerHTML=`<h1>📜 لاگ سیستم — خطاها و رویدادها</h1>
+ <div class="sub">آخرین رویدادهای چرخه، خطاها و هشدارهای ریسک — هر ۵ ثانیه به‌روز می‌شود
+ <button class="ghost" onclick="logsFill()" style="margin-right:10px;padding:5px 12px;font-size:11px">↻ به‌روزرسانی</button></div>
+ <div class="card" id="logbox"><div class="sub">…</div></div>`;
+ await logsFill();
+}
+async function logsFill(){
+ try{
+  const d=await jget('/api/logs');
+  const box=document.getElementById('logbox'); if(!box)return;
+  box.innerHTML=`<table><thead><tr><th>زمان</th><th>نوع</th><th>منبع</th><th>پیام</th></tr></thead><tbody>
+  ${(d.events||[]).map(e=>`<tr><td class="mono" style="white-space:nowrap">${faT(e.ts)}</td><td>${lvlChip(e.level)}</td>
+   <td class="mono">${e.source}</td>
+   <td style="white-space:normal;max-width:520px">${e.message}${e.detail?`<div class="mono" style="white-space:pre-wrap;font-size:10px;color:var(--dim2);max-height:130px;overflow:auto;margin-top:4px">${e.detail}</div>`:''}</td></tr>`).join('')
+   ||'<tr><td colspan=4>هنوز رویدادی ثبت نشده — یک چرخه اجرا کن</td></tr>'}</tbody></table>`;
+ }catch(e){const b=document.getElementById('logbox');if(b)b.innerHTML='<div class="sub">خطا در دریافت لاگ</div>'}
+}
 /* ---------------- research ---------------- */
 async function pgResearch(){
  const app=document.getElementById('app');
@@ -754,13 +798,14 @@ async function pgSettings(){
 }
 /* ---------------- actions ---------------- */
 async function doRun(){
+ const r=await (await fetch('/api/run',{method:'POST'})).json();
+ if(!r.started){toast(r.why||'شروع نشد');render();return}
  const d0=await jget('/api/state');const t0=d0.decisions.length?d0.decisions[0].ts:0;
- toast('چرخه شروع شد…');
- await fetch('/api/run',{method:'POST'});
+ toast('چرخه شروع شد… (📜 لاگ را ببین)');
  let tries=0;const iv=setInterval(async()=>{
   tries++;const d=await jget('/api/state');
   if(d.decisions.length&&d.decisions[0].ts>t0){clearInterval(iv);toast('چرخه تمام شد ✓');render();}
-  else if(tries>60){clearInterval(iv);toast('پایان انتظار');render();}
+  else if(tries>60){clearInterval(iv);toast('پایان انتظار — جزئیات در 📜 لاگ');render();}
  },5000)}
 async function doHalt(){const s=await jget('/api/settings');
  await fetch(s.halted?'/api/resume':'/api/halt',{method:'POST'});
@@ -769,6 +814,7 @@ async function notifyTest(){const r=await (await fetch('/api/notify-test',{metho
  toast(r.sent?'پیام تلگرام ارسال شد ✓':'ارسال نشد — تنظیمات/شبکه را چک کن')}
 /* ---------------- boot ---------------- */
 refreshLive();setInterval(refreshLive,15000);setInterval(()=>{if(curPageNeeds())render()},60000);
+setInterval(()=>{if(location.hash.includes('logs'))logsFill()},5000);
 function curPageNeeds(){return location.hash.includes('overview')||location.hash.includes('markets')}
 render();
 </script></body></html>"""

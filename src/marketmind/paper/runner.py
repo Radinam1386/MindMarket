@@ -13,9 +13,11 @@ Decision policy (LLM advises inside a hard envelope):
 from __future__ import annotations
 
 import time
+import traceback
 
 import pandas as pd
 
+from .. import events
 from ..backtest.strategies import donchian_er
 from ..config import (
     MARGIN_LIQ_FRAC,
@@ -115,6 +117,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
     conn = state.connect()
     state.init_account(cash=200.0)
     if state.get_setting(conn, "halted") == "1":
+        events.record("warn", "cycle",
+                      "⛔ چرخه اجرا نشد: حساب در حالت HALTED است (داشبورد: ▶ ادامه)")
         equity = state.snapshot_equity(conn, {})
         conn.close()
         return {"ts": int(time.time()), "equity": equity, "open": 0, "closed": 0,
@@ -124,12 +128,24 @@ def run_cycle(notify=None, force: bool = False) -> dict:
     if not force:
         last = state.last_cycle_day(conn)
         if last and (int(time.time()) - last) < 20 * 3600:
+            events.record("info", "cycle",
+                          "چرخهٔ امروز قبلاً اجرا شده (برای اجرای مجدد force لازم است)")
             conn.close()
             return {"ts": int(time.time()), "equity": state.account_cash(conn),
                     "open": 0, "closed": 0, "positions": [],
                     "lines": ["⏭ today's cycle already ran (use force to override)"]}
 
-    frames = refresh_candles(client)
+    events.record("info", "cycle",
+                  f"شروع چرخه (force={force}) — به‌روزرسانی کندل‌ها از والکس…")
+    try:
+        frames = refresh_candles(client)
+    except Exception as e:
+        events.record("error", "cycle", f"خطا در به‌روزرسانی کندل‌ها: {e}",
+                      traceback.format_exc()[-1200:])
+        conn.close()
+        return {"ts": int(time.time()), "equity": state.account_cash(conn),
+                "open": 0, "closed": 0, "positions": [],
+                "lines": [f"❌ candle refresh failed: {e}"]}
     prem_df = ingest.load_candles("USDTTMN", "1D")
     prem_z = analyst.premium_z_now(prem_df) if prem_df is not None else None
     prices, opened, closed, held = {}, [], [], []
@@ -145,6 +161,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         try:
             quote = live_quote(client, sym)
         except Exception as e:
+            events.record("warn", "cycle", f"{sym}: خطا در دریافت قیمت لایو: {e}")
             state.record_decision(conn, sym, "skip", {"why": f"quote error: {e}"})
             continue
         px = quote["mid"]
@@ -180,6 +197,9 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                           {"entry_sig": entry_sig, "exit_sig": exit_sig},
                                           memory=memory)
                 state.save_analyst(conn, sym, opinion)
+                if not opinion.get("ok"):
+                    events.record("warn", "llm",
+                                  f"{sym}: تحلیل AI ناموفق — {opinion.get('summary', '')[:200]}")
 
         # 1) liquidation watch (deterministic, always)
         if pos is not None:
@@ -281,6 +301,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         state.set_setting(conn, "halted", "1")
         auto_halted = True
         summary_lines_extra = [f"⛔ AUTO-HALT: equity {equity:.2f} is >10% below peak {peak:.2f}"]
+        events.record("warn", "risk", summary_lines_extra[0])
     else:
         summary_lines_extra = []
     summary = {"ts": int(time.time()), "equity": round(equity, 2),
@@ -293,6 +314,9 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                          f"equity: {equity:.2f} USDT"]}
     summary["lines"] = summary["lines"] + summary_lines_extra
     summary["auto_halted"] = auto_halted
+    events.record("info", "cycle",
+                  "چرخه تمام شد — " + " · ".join((opened + closed) or ["بدون معاملهٔ جدید"])
+                  + f" · equity {equity:.2f} USDT")
     if notify:
         try:
             notify("\n".join(["🧠 MarketMind paper (hybrid)"] + summary["lines"]))
