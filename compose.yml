@@ -1,0 +1,29 @@
+# MarketMind on a self-hosted VPS (Docker Compose).
+# Data persists in ./data at the repo root: paper.sqlite, candles/, secrets/.
+# Optional runtime config lives in .env (never committed): DASHBOARD_TOKEN,
+# LLM_BASE_URL / LLM_API_KEY / LLM_MODEL, TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
+services:
+  marketmind:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: marketmind:local
+    container_name: marketmind
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      MARKETMIND_ROOT: /app
+      MARKETMIND_SCHEDULER: "1"
+      PORT: "8787"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 60s

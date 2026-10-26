@@ -1,0 +1,10 @@
+[Unit]
+Description=Run MarketMind pull-deploy every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Unit=marketmind-deploy.service
+
+[Install]
+WantedBy=timers.target

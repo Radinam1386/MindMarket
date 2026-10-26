@@ -1,0 +1,10 @@
+[Unit]
+Description=MarketMind pull-deploy (git fetch + rebuild when origin/main moves)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/marketmind
+ExecStart=/opt/marketmind/deploy/vps-deploy.sh
+TimeoutStartSec=900
