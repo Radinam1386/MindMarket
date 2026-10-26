@@ -23,6 +23,12 @@ def load_config() -> dict | None:
         cfg = json.loads(SECRETS.read_text())
         if cfg.get("base_url") and cfg.get("api_key") and cfg.get("model"):
             return cfg
+    import os
+    base = os.environ.get("LLM_BASE_URL")
+    key = os.environ.get("LLM_API_KEY")
+    model = os.environ.get("LLM_MODEL")
+    if base and key and model:
+        return {"base_url": base, "api_key": key, "model": model}
     return None
 
 
