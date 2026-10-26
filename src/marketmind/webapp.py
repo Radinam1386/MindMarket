@@ -599,10 +599,11 @@ async function ovFill(){
   <div class="card"><h3>📂 موقعیت‌های باز</h3><table><thead><tr>
    <th>نماد</th><th>نوع</th><th>ورود</th><th>لایو</th><th>PnL%</th><th>لیکویید</th><th>فاصله</th><th>وثیقه</th></tr></thead>
    <tbody>${d.positions.map(p=>{const cur=(MK.markets[p.symbol]||{}).last;
-     const pnl=cur?((cur/p.entry_px-1)*(1+p.leverage)*100):null;
-     const dist=cur?((cur/p.liq_px-1)*100):null;
+     const sh=p.side==='short';
+     const pnl=cur?((sh?((p.entry_px/cur)-1):((cur/p.entry_px)-1))*(1+p.leverage)*100):null;
+     const dist=cur?((sh?((p.liq_px/cur)-1):((cur/p.liq_px)-1))*100):null;
      return `<tr style="cursor:pointer" onclick="location.hash='#/coin/${p.symbol}'">
-     <td><b>${p.symbol}</b></td><td>${tag(p.meta)}</td><td>${fmtP(p.entry_px)}</td>
+     <td><b>${p.symbol}</b>${sh?' <span class="chip c-bear">شورت</span>':''}</td><td>${tag(p.meta)}</td><td>${fmtP(p.entry_px)}</td>
      <td>${cur?fmtP(cur):'—'}</td><td class="${cls(pnl||0)}">${pnl==null?'—':sgn(pnl,1)}</td>
      <td>${fmtP(p.liq_px)}</td><td class="${dist!=null&&dist<15?'neg':''}">${dist==null?'—':f(dist,1)+'%'}</td>
      <td>${f(p.collateral,1)}$</td></tr>`}).join('')||'<tr><td colspan=8>—</td></tr>'}</tbody></table></div>

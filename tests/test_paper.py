@@ -74,3 +74,21 @@ def test_recent_analyst_exposes_cached_opinion_keys(tmp_path, monkeypatch):
     assert not missing, f"recent_analyst is missing keys: {sorted(missing)}"
     assert rows[0]["size_factor"] == pytest.approx(0.5)
     assert rows[0]["support"] == "60k" and rows[0]["resistance"] == "70k"
+
+
+def test_short_open_close_accounting(tmp_path, monkeypatch):
+    """Short side: collateral math, liquidation px above entry, and PnL when
+    price falls — the runner opens these when MARKETMIND_ALLOW_SHORTS=1."""
+    monkeypatch.setattr(state, "DB_PATH", tmp_path / "paper.sqlite")
+    state.init_account(cash=200.0)
+    conn = state.connect()
+    pid = state.open_position(conn, "BTCUSDT", "short", price=80000.0, collateral=40.0,
+                              leverage=3.0, liq_frac=0.8546, liq_offset=0.0045)
+    assert state.account_cash(conn) == pytest.approx(160.0)
+    pos = conn.execute("SELECT * FROM positions WHERE id=?", (pid,)).fetchone()
+    assert pos["side"] == "short"
+    assert pos["liq_px"] == pytest.approx(80000.0 * (1 + 0.8546 / 3.0 - 0.0045), rel=1e-9)
+    # price falls 10%: gross = qty*(entry-exit) = (160/80000)*8000 = +16 USDT
+    res = state.close_position(conn, pid, 72000.0, "signal")
+    assert res["return_pct"] > 0
+    assert state.account_cash(conn) == pytest.approx(160.0 + res["settlement"])

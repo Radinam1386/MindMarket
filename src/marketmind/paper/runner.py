@@ -65,6 +65,7 @@ PAPER_CFG["llm_confidence_min"] = _env_float("MARKETMIND_LLM_CONF_MIN",
 PAPER_CFG["max_positions"] = int(_env_float("MARKETMIND_MAX_POSITIONS",
                                             PAPER_CFG["max_positions"]))
 PAPER_CFG["cycle_interval_min"] = max(1.0, _env_float("MARKETMIND_CYCLE_MINUTES", 15.0))
+PAPER_CFG["allow_shorts"] = os.environ.get("MARKETMIND_ALLOW_SHORTS", "0") == "1"
 
 
 SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
@@ -188,10 +189,12 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         er_now = efficiency_ratio(df["close"], PAPER_CFG["er_n"]).iloc[-1]
         sma200_now = float(df["close"].rolling(PAPER_CFG["sma_n"]).mean().shift(1).iloc[-1])
         upper_prev = float(df["high"].rolling(PAPER_CFG["entry_n"]).max().shift(1).iloc[-1])
+        lower_prev = float(df["low"].rolling(PAPER_CFG["exit_n"]).min().shift(1).iloc[-1])
         gate_detail = {"er": (round(float(er_now), 3) if er_now == er_now else None),
                        "er_min": PAPER_CFG["er_min"],
                        "above_sma200": bool(close_daily > sma200_now),
-                       "breakout": bool(close_daily > upper_prev)}
+                       "breakout": bool(close_daily > upper_prev),
+                       "breakdown": bool(close_daily < lower_prev)}
         try:
             quote = live_quote(client, sym)
         except Exception as e:
@@ -250,12 +253,19 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 pos = None
 
         # 2) exits (deterministic; LLM cannot block)
-        if pos is not None and exit_sig:
+        if pos is not None and pos["side"] == "long" and exit_sig:
             res = state.close_position(conn, pos["id"], exit_fill(quote), "signal")
             state.record_decision(conn, sym, "close",
                                   {"px": px, "signal": "chan10_exit",
                                    **{k: round(v, 4) for k, v in res.items()}})
             closed.append(f"🔒 {sym} closed {res['return_pct']:+.1f}%")
+            pos = None
+        elif pos is not None and pos["side"] == "short" and close_daily > short_exit_px:
+            res = state.close_position(conn, pos["id"], entry_fill(quote), "signal")
+            state.record_decision(conn, sym, "close",
+                                  {"px": px, "signal": "short_exit",
+                                   **{k: round(v, 4) for k, v in res.items()}})
+            closed.append(f"🔒 {sym} closed short {res['return_pct']:+.1f}%")
             pos = None
 
         # 3) entries
@@ -264,6 +274,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             cash = state.account_cash(conn)
             atr = atr_of(df)
             total_equity_cash = cash + _deployed_collateral(conn)
+            allow_shorts = PAPER_CFG.get("allow_shorts", False)
+            short_breakdown = bool(close_daily < lower_prev)
 
             if entry_sig:
                 # deterministic signal; LLM may veto or scale size down only
@@ -323,14 +335,72 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                                "llm": opinion["summary"][:200]})
                         opened.append(f"🤖 {sym} open(LLM) @{px:.4g} coll {coll:.1f}$ "
                                       f"conf {opinion['confidence']:.0%}")
+            elif allow_shorts and short_breakdown and er_now == er_now and er_now >= PAPER_CFG["er_min"]:
+                # deterministic short breakdown; a bullish LLM opinion vetoes
+                if opinion is not None and opinion["ok"] and opinion["bias"] == "bullish":
+                    state.record_decision(conn, sym, "skip",
+                                          {"why": "llm_veto_short",
+                                           "llm": opinion["summary"][:200]})
+                elif n_open >= PAPER_CFG["max_positions"]:
+                    state.record_decision(conn, sym, "skip", {"why": "max_positions"})
+                else:
+                    coll = sizing(total_equity_cash, px, atr)
+                    if opinion is not None and opinion["ok"]:
+                        coll = coll * min(1.0, opinion["size_factor"])
+                    if coll <= 0:
+                        state.record_decision(conn, sym, "skip",
+                                              {"why": "below min notional"})
+                    else:
+                        state.open_position(conn, sym, "short", exit_fill(quote), coll,
+                                            PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
+                                            MARGIN_LIQ_OFFSET,
+                                            meta={"strategy": "donchian_short",
+                                                  "llm_bias": (opinion or {}).get("bias"),
+                                                  "atr": atr})
+                        state.record_decision(conn, sym, "open",
+                                              {"px": px, "collateral": round(coll, 2),
+                                               "atr": round(atr, 2), "path": "short_signal",
+                                               "llm": (opinion or {}).get("summary", "")[:200]})
+                        opened.append(f"🔻 {sym} open(short) @{px:.4g} coll {coll:.1f}$")
+            elif (allow_shorts and opinion is not None and opinion["ok"]
+                  and opinion["entry_ok"] and opinion["bias"] == "bearish"
+                  and opinion["confidence"] >= PAPER_CFG["llm_confidence_min"]):
+                # LLM-conviction short: half cap, one slot, tagged for scoring
+                has_llm = conn.execute(
+                    "SELECT COUNT(*) c FROM positions WHERE meta LIKE '%llm_conviction%'"
+                ).fetchone()["c"]
+                if n_open >= PAPER_CFG["max_positions"]:
+                    state.record_decision(conn, sym, "skip", {"why": "max_positions"})
+                elif has_llm:
+                    state.record_decision(conn, sym, "skip", {"why": "llm slot busy"})
+                else:
+                    coll = sizing(total_equity_cash, px, atr,
+                                  cap_frac=PAPER_CFG["llm_fraction_cap"])
+                    if coll <= 0:
+                        state.record_decision(conn, sym, "skip",
+                                              {"why": "below min notional"})
+                    else:
+                        state.open_position(conn, sym, "short", exit_fill(quote), coll,
+                                            PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
+                                            MARGIN_LIQ_OFFSET,
+                                            meta={"strategy": "llm_conviction_short",
+                                                  "llm_conf": opinion["confidence"],
+                                                  "atr": atr})
+                        state.record_decision(conn, sym, "open",
+                                              {"px": px, "collateral": round(coll, 2),
+                                               "path": "llm_conviction_short",
+                                               "llm": opinion["summary"][:200]})
+                        opened.append(f"🤖 {sym} open(LLM short) @{px:.4g} coll {coll:.1f}$ "
+                                      f"conf {opinion['confidence']:.0%}")
             else:
                 state.record_decision(conn, sym, "hold",
                                       {"px": px, "note": "no signal", **gate_detail})
         else:
             held.append(sym)
+            dist = ((pos["liq_px"] / px if pos["side"] == "short" else px / pos["liq_px"]) - 1) * 100
             state.record_decision(conn, sym, "hold",
                                   {"px": px, "liq_px": round(pos["liq_px"], 2),
-                                   "distance_pct": round((px / pos["liq_px"] - 1) * 100, 1),
+                                   "distance_pct": round(dist, 1),
                                    "llm_bias": (opinion or {}).get("bias")})
 
     equity = state.snapshot_equity(conn, prices)
