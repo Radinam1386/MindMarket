@@ -20,9 +20,10 @@ jobs:
       - name: Run tests
         run: |
           set -o pipefail
-          pytest -q --tb=short 2>&1 | tee pytest.out || {
-            echo "::error::$(grep -m1 -E 'Error|FAILED' pytest.out | head -c 300)"
-            tail -30 pytest.out
+          pytest -q --tb=long 2>&1 | tee pytest.out || {
+            grep -E "Error|error:|FAILED|assert" pytest.out | tail -8 | while IFS= read -r l; do
+              echo "::error::$(echo "$l" | head -c 280)"
+            done
             exit 1
           }
         env:
