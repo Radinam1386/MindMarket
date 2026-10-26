@@ -1,7 +1,8 @@
 # MarketMind on a self-hosted VPS (Docker Compose).
 # Data persists in ./data at the repo root: paper.sqlite, candles/, secrets/.
-# Optional runtime config lives in .env (never committed): DASHBOARD_TOKEN,
-# LLM_BASE_URL / LLM_API_KEY / LLM_MODEL, TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
+# Optional runtime config lives in .env (never committed): DASHBOARD_USER /
+# DASHBOARD_PASSWORD (login fallback), LLM_BASE_URL / LLM_API_KEY / LLM_MODEL,
+# TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
 services:
   marketmind:
     build:

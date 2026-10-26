@@ -11,14 +11,18 @@ VPS 62.60.194.78
      ├─ compose.yml            تعریف سرویس marketmind (پورت 8787)
      ├─ deploy/vps-deploy.sh   اسکریپت pull-deploy (fetch → build → up → healthcheck)
      ├─ deploy/systemd/        یونیت‌های تایمر CD (هر ۵ دقیقه)
-     └─ data/                  دادهٔ ماندگار ( volumen ./data:/app/data )
+     └─ data/                  دادهٔ ماندگار ( volume ./data:/app/data )
          ├─ paper.sqlite       حساب ۲۰۰ USDT و موقعیت‌ها و تصمیم‌ها
          ├─ candles/           کندل‌ها (بوت اول از seed پر می‌شود، بعد از API تازه می‌شود)
-         └─ secrets/           llm_api.json · dashboard_token.txt · telegram.json (اختیاری)
+         └─ secrets/           dashboard_login.json · llm_api.json · telegram.json (اختیاری)
 ```
 
-- داشبورد: `http://62.60.194.78:8787/?token=<محتوای dashboard_token.txt>`
-- بدون توکن، دسترسی ریموت ۴۰۳ می‌شود (رفتار عمدی کد).
+- **داشبورد:** `http://62.60.194.78:8787` — ورود با **یوزر/پس** (پنجرهٔ استاندارد Basic Auth مرورگر).
+  اعتبارنامه‌ها در `data/secrets/dashboard_login.json`:
+  `{"username": "...", "password": "..."}` — تغییرشان بدهید و `docker compose restart` بزنید.
+- بدون اعتبارنامه: درخواست ریموت ۴۰۱ می‌گیرد؛ اگر فایل ورود اصلاً نباشد ۴۰۳.
+  فقط `127.0.0.1` (روی خود سرور) و `/healthz` بدون ورود بازند.
+- توکن در URL دیگر وجود ندارد (حذف شد)؛ `dashboard_token.txt` قدیمی نادیده گرفته می‌شود.
 - چرخهٔ روزانهٔ paper داخل کانتینر اجرا می‌شود (`MARKETMIND_SCHEDULER=1`)، هر روز ۰۱:۰۰ UTC = ۰۴:۳۰ تهران.
 
 ## جریان انتشار (CI/CD)
@@ -31,8 +35,6 @@ VPS 62.60.194.78
 3. **مسیر اختیاری (دیپلوی آنی):** اگر سکرت‌های `VPS_HOST` و `VPS_SSH_KEY`
    در Settings → Secrets → Actions ریپو ست شوند، جاب `deploy-vps` بلافاصله
    بعد از تست سبز، همان اسکریپت را با `--force` از طریق SSH اجرا می‌کند.
-   کلید عمومی CI از قبل روی سرور نصب است؛ کلید خصوصی یک‌بار به‌عنوان
-   `VPS_SSH_KEY` وارد می‌شود (فایل `marketmind-ci-ed25519` خارج از ریپو).
 4. دیپلوی داده‌ها را دست نمی‌زند — فقط کد/ایمیج عوض می‌شود (`data/` volume است).
 
 ## دستورهای روزمره
@@ -62,20 +64,21 @@ docker compose restart                  # ری‌استارت ساده
 ## اسرار
 
 هیچ کلیدی در گیت/ایمیج نیست. روی سرور در `/opt/marketmind/data/secrets/`:
-- `dashboard_token.txt` — توکن داشبورد (تولیدشده هنگام راه‌اندازی)
+- `dashboard_login.json` — یوزر/پس داشبورد (ورود مرورگر)
 - `llm_api.json` — کانفیگ LLM (کپی از لوکال؛ بدون آن پنل AI «تحلیل ناموفق» می‌دهد ولی سیستم بالا می‌ماند)
 - `telegram.json` — اختیاری (بلاک بودن تلگرام از ایران را ببینید)
 
-LLM/تلگرام/توکن از env هم خوانده می‌شوند (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`,
-`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DASHBOARD_TOKEN`) — فایل در `/opt/marketmind/.env`
+اعتبارنامهٔ داشبورد و LLM/تلگرام از env هم خوانده می‌شوند (`DASHBOARD_USER`,
+`DASHBOARD_PASSWORD`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`,
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) — فایل در `/opt/marketmind/.env`
 (کامیت نمی‌شود) و compose آن را به کانتینر می‌دهد.
 
 ## عیب‌یابی سریع
 
 | نشانه | علت احتمالی | راه‌حل |
 |---|---|---|
-| 401 روی `/` | توکن در URL نیست/غلط است | `?token=` با محتوای `data/secrets/dashboard_token.txt` |
-| 403 از لوکال‌هاست سرور | توکن ست نشده | فایل توکن را بسازید و `docker compose restart` |
+| پنجرهٔ ورود باز می‌شود و رد می‌شوید | یوزر/پس غلط | محتوای `data/secrets/dashboard_login.json`؛ مرورگر را ببندید و باز کنید (کش اعتبارنامه) |
+| 403 ریموت با پیام «login not configured» | `dashboard_login.json` نیست | فایل را در `data/secrets/` بسازید و `docker compose restart` |
 | build خطای pull از docker.io | آینه‌ها موقتاً خراب | `daemon.json` را عوض کنید یا بعداً تایمر خودش دوباره امتحان می‌کند |
 | AI همیشه «تحلیل ناموفق» | `llm_api.json` نیست یا LLM در دسترس نیست | فایل را در `data/secrets/` بگذارید و ری‌استارت |
 | چرخهٔ روزانه اجرا نمی‌شود | `MARKETMIND_SCHEDULER` حذف شده | در compose.yml باید `1` باشد؛ لاگ را ببینید |

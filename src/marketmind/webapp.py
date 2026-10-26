@@ -12,6 +12,10 @@ No external CDNs — everything vanilla.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
+import json
 import threading
 import time
 
@@ -23,18 +27,42 @@ from .paper import state
 
 app = FastAPI(title="MarketMind", docs_url=None, redoc_url=None)
 
-TOKEN_FILE = DATA_DIR / "secrets" / "dashboard_token.txt"
+LOGIN_FILE = DATA_DIR / "secrets" / "dashboard_login.json"
 ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
           "ADAUSDT", "LINKUSDT", "DOTUSDT", "DOGEUSDT", "USDTTMN"]
 _cache: dict = {"markets": None, "markets_ts": 0.0, "signals": None, "signals_ts": 0.0}
 _run_lock = threading.Lock()
 
 
-def _token() -> str | None:
-    if TOKEN_FILE.exists():
-        return TOKEN_FILE.read_text().strip()
+def _login() -> tuple[str, str] | None:
+    """Dashboard credentials: data/secrets/dashboard_login.json (username/password),
+    with DASHBOARD_USER / DASHBOARD_PASSWORD env fallback."""
+    if LOGIN_FILE.exists():
+        try:
+            cfg = json.loads(LOGIN_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        user, password = cfg.get("username"), cfg.get("password")
+        if user and password:
+            return str(user), str(password)
     import os
-    return os.environ.get("DASHBOARD_TOKEN") or None
+    user = os.environ.get("DASHBOARD_USER")
+    password = os.environ.get("DASHBOARD_PASSWORD")
+    if user and password:
+        return user, password
+    return None
+
+
+def _basic_credentials(request: Request) -> tuple[str, str] | None:
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith("Basic "):
+        return None
+    try:
+        raw = base64.b64decode(header[6:].strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    user, _, password = raw.partition(":")
+    return user, password
 
 
 @app.on_event("startup")
@@ -75,17 +103,21 @@ def _boot() -> None:
 async def auth(request: Request, call_next):
     if request.url.path == "/healthz":  # platform healthcheck — never blocked
         return await call_next(request)
-    tok = _token()
-    if tok:
-        supplied = request.query_params.get("token") or request.headers.get("X-Token")
-        if supplied != tok:
-            return JSONResponse({"detail": "invalid token"}, status_code=401)
-    else:
-        host = request.client.host if request.client else ""
-        if host not in ("127.0.0.1", "::1", "localhost"):
-            return JSONResponse({"detail": "token required for remote access"},
-                                status_code=403)
-    return await call_next(request)
+    host = request.client.host if request.client else ""
+    if host in ("127.0.0.1", "::1", "localhost"):
+        return await call_next(request)  # local scripts/healthchecks stay open
+    creds_cfg = _login()
+    if not creds_cfg:
+        return JSONResponse({"detail": "login not configured on the server"
+                                     " (data/secrets/dashboard_login.json)"},
+                            status_code=403)
+    supplied = _basic_credentials(request)
+    if (supplied is not None
+            and hmac.compare_digest(supplied[0], creds_cfg[0])
+            and hmac.compare_digest(supplied[1], creds_cfg[1])):
+        return await call_next(request)
+    return JSONResponse({"detail": "unauthorized"}, status_code=401,
+                        headers={"WWW-Authenticate": 'Basic realm="MarketMind", charset="UTF-8"'})
 
 
 @app.get("/healthz")
@@ -254,7 +286,7 @@ def api_settings():
     return JSONResponse({
         "telegram": (secrets / "telegram.json").exists(),
         "llm": (secrets / "llm_api.json").exists(),
-        "dashboard_token": TOKEN_FILE.exists(),
+        "dashboard_login": LOGIN_FILE.exists(),
         "wallex_key": (secrets / "wallex_api_key.txt").exists(),
         "halted": halted,
     })
@@ -706,8 +738,8 @@ async function pgSettings(){
      <td class="mono">data/secrets/telegram.json</td></tr>
  <tr><td>🔑 کلید والکس</td><td>${s.wallex_key?'<span class="chip c-amb">موجود (قفل نردبان فعال)</span>':'<span class="chip c-neut">موجود نیست</span>'}</td>
      <td class="mono">data/secrets/wallex_api_key.txt</td></tr>
- <tr><td>🛡 توکن داشبورد</td><td>${s.dashboard_token?'<span class="chip c-bull">فعال</span>':'<span class="chip c-neut">فقط لوکال</span>'}</td>
-     <td class="mono">data/secrets/dashboard_token.txt</td></tr>
+ <tr><td>🛡 ورود داشبورد</td><td>${s.dashboard_login?'<span class="chip c-bull">یوزر/پس فعال</span>':'<span class="chip c-neut">فقط لوکال</span>'}</td>
+     <td class="mono">data/secrets/dashboard_login.json</td></tr>
  <tr><td>⛔ وضعیت معامله‌گری</td><td>${s.halted?'<span class="chip c-bear">متوقف</span>':'<span class="chip c-bull">فعال</span>'}</td><td>—</td></tr>
  </tbody></table>
  <div style="margin-top:14px">

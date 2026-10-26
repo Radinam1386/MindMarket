@@ -444,7 +444,8 @@ def cmd_paper(args) -> None:
     elif args.action == "serve":
         import uvicorn
         from .webapp import app
-        print("dashboard: http://127.0.0.1:8787/ (set data/secrets/dashboard_token.txt for remote)")
+        print("dashboard: http://127.0.0.1:8787/ (set data/secrets/dashboard_login.json"
+              " {username, password} for remote access)")
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     elif args.action == "notify-test":
         ok = notify.send("✅ MarketMind: اتصال تلگرام برقرار است.")
