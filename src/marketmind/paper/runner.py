@@ -178,12 +178,16 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 rows = state.recent_analyst(conn, sym, 1)
                 if rows:
                     r0 = rows[0]
-                    opinion = {"bias": r0["bias"], "confidence": r0["confidence"],
-                               "entry_ok": bool(r0["entry_ok"]),
-                               "size_factor": r0["size_factor"] or 0.5,
-                               "key_levels": {"support": r0["support"],
-                                              "resistance": r0["resistance"]},
-                               "summary": r0["summary"], "ok": True, "cached": True}
+                    # defensive .get: a SELECT/legacy-schema missing key must never
+                    # kill the whole cycle (was: KeyError 'size_factor'/'support')
+                    opinion = {"bias": r0.get("bias") or "neutral",
+                               "confidence": float(r0.get("confidence") or 0.0),
+                               "entry_ok": bool(r0.get("entry_ok")),
+                               "size_factor": r0.get("size_factor") or 0.5,
+                               "key_levels": {"support": r0.get("support") or "",
+                                              "resistance": r0.get("resistance") or ""},
+                               "summary": r0.get("summary") or "",
+                               "ok": True, "cached": True}
             else:
                 memory = []
                 now_px = float(df["close"].iloc[-1])

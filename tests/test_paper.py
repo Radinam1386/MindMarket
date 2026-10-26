@@ -54,3 +54,23 @@ def _with_entry_ts(row, ts):
     d = dict(row)
     d["entry_ts"] = ts
     return d
+
+
+def test_recent_analyst_exposes_cached_opinion_keys(tmp_path, monkeypatch):
+    """Regression: run_cycle's cached-opinion branch (second same-day cycle) reads
+    size_factor/support/resistance from recent_analyst rows; any missing key used
+    to crash the whole cycle with KeyError."""
+    monkeypatch.setattr(state, "DB_PATH", tmp_path / "paper.sqlite")
+    conn = state.connect()
+    state.save_analyst(conn, "BTCUSDT",
+                       {"bias": "bullish", "confidence": 0.8, "entry_ok": True,
+                        "size_factor": 0.5, "ok": True,
+                        "key_levels": {"support": "60k", "resistance": "70k"},
+                        "summary": "ok"})
+    rows = state.recent_analyst(conn, "BTCUSDT", 1)
+    assert rows, "analyst row must be readable"
+    missing = ({"ts", "bias", "confidence", "entry_ok", "size_factor",
+                "support", "resistance", "summary"} - set(rows[0]))
+    assert not missing, f"recent_analyst is missing keys: {sorted(missing)}"
+    assert rows[0]["size_factor"] == pytest.approx(0.5)
+    assert rows[0]["support"] == "60k" and rows[0]["resistance"] == "70k"

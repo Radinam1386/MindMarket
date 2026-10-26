@@ -101,8 +101,12 @@ def save_analyst(conn: sqlite3.Connection, symbol: str, a: dict) -> None:
 
 
 def recent_analyst(conn: sqlite3.Connection, symbol: str, limit: int = 3) -> list[dict]:
+    # Must select every key run_cycle's cached-opinion branch reads (ts, bias,
+    # confidence, entry_ok, size_factor, support, resistance, summary) — a missing
+    # key crashed the whole cycle with KeyError (bug found via the dashboard log).
     return [dict(r) for r in conn.execute(
-        "SELECT ts, bias, confidence, entry_ok, summary FROM analyst"
+        "SELECT ts, bias, confidence, entry_ok, size_factor, support, resistance,"
+        " summary FROM analyst"
         " WHERE symbol=? ORDER BY id DESC LIMIT ?", (symbol, limit))]
 
 
@@ -123,11 +127,20 @@ def last_cycle_day(conn: sqlite3.Connection) -> int | None:
     return int(row["m"]) if row and row["m"] else None
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after early Stage-4 DBs (CREATE IF NOT EXISTS cannot)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(analyst)")}
+    if cols and "size_factor" not in cols:
+        conn.execute("ALTER TABLE analyst ADD COLUMN size_factor REAL NOT NULL DEFAULT 0.5")
+        conn.commit()
+
+
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
