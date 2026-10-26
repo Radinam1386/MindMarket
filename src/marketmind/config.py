@@ -6,8 +6,26 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Repo root = two levels above this file (src/marketmind/config.py -> repo)
-ROOT = Path(__file__).resolve().parents[2]
+def _find_root() -> Path:
+    """Locate the project root reliably in dev AND installed deployments.
+
+    Priority: MARKETMIND_ROOT env, then CWD if it looks like the repo,
+    then the source-tree location (editable installs). A plain `pip install`
+    puts this file in site-packages, where parents[2] is NOT the project —
+    which would silently move the whole data dir into site-packages.
+    """
+    import os
+
+    env = os.environ.get("MARKETMIND_ROOT")
+    if env:
+        return Path(env)
+    cwd = Path.cwd()
+    if (cwd / "pyproject.toml").exists() and (cwd / "src" / "marketmind").is_dir():
+        return cwd
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT = _find_root()
 
 DATA_DIR = ROOT / "data"
 CANDLES_DIR = DATA_DIR / "candles"
@@ -16,6 +34,11 @@ LOGS_DIR = ROOT / "logs"
 REPORTS_DIR = ROOT / "docs" / "reports"
 
 WALLEX_BASE_URL = "https://api.wallex.ir"
+
+# Deployment: seed data baked into the image is copied to DATA_DIR on first boot
+import os as _os
+
+SEED_DIR = Path(_os.environ.get("MARKETMIND_SEED", ROOT / "deploy" / "seed"))
 
 # Candle resolutions supported by GET /v1/udf/history (verified 2026-10-25).
 # 5 / 30 / 1W are rejected by the endpoint.

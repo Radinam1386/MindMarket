@@ -37,18 +37,60 @@ def _token() -> str | None:
     return os.environ.get("DASHBOARD_TOKEN") or None
 
 
+@app.on_event("startup")
+def _boot() -> None:
+    """Server-mode boot: seed data on first deploy + run the daily cycle in-process.
+
+    Enabled by MARKETMIND_SCHEDULER=1 (set in the deployment image). Local runs
+    of `paper serve` keep using the external daily automation instead.
+    """
+    import os
+
+    from .data.ingest import seed_if_empty
+
+    seed_if_empty()
+    if os.environ.get("MARKETMIND_SCHEDULER") != "1":
+        return
+
+    def cycle_loop() -> None:
+        import time as _t
+
+        while True:
+            now = _t.time()
+            next_run = (int(now) // 86400 + 1) * 86400 + 3600  # next 01:00 UTC = 04:30 Tehran
+            _t.sleep(max(5.0, next_run - now))
+            try:
+                from . import notify
+                from .paper import runner
+
+                runner.run_cycle(notify=notify.send)
+                _cache["signals_ts"] = 0.0
+            except Exception:
+                continue  # scheduler must never die
+
+    threading.Thread(target=cycle_loop, daemon=True, name="mm-scheduler").start()
+
+
 @app.middleware("http")
 async def auth(request: Request, call_next):
+    if request.url.path == "/healthz":  # platform healthcheck — never blocked
+        return await call_next(request)
     tok = _token()
     if tok:
         supplied = request.query_params.get("token") or request.headers.get("X-Token")
         if supplied != tok:
-            raise HTTPException(status_code=401, detail="invalid token")
+            return JSONResponse({"detail": "invalid token"}, status_code=401)
     else:
         host = request.client.host if request.client else ""
         if host not in ("127.0.0.1", "::1", "localhost"):
-            raise HTTPException(status_code=403, detail="token required for remote access")
+            return JSONResponse({"detail": "token required for remote access"},
+                                status_code=403)
     return await call_next(request)
+
+
+@app.get("/healthz")
+def healthz():
+    return JSONResponse({"ok": True})
 
 
 # ---------------------------------------------------------------- live data
@@ -172,6 +214,9 @@ def api_coin(symbol: str, res: str = "1D", bars: int = 180):
     conn = state.connect()
     ana = conn.execute("SELECT * FROM analyst WHERE symbol=? ORDER BY id DESC LIMIT 1",
                        (symbol,)).fetchone()
+    ana_hist = [dict(r) for r in conn.execute(
+        "SELECT ts, bias, confidence, entry_ok, summary FROM analyst"
+        " WHERE symbol=? ORDER BY id DESC LIMIT 6", (symbol,))]
     pos = conn.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
     trades = [dict(r) for r in conn.execute(
         "SELECT * FROM trades WHERE symbol=? ORDER BY exit_ts DESC LIMIT 20", (symbol,))]
@@ -187,6 +232,7 @@ def api_coin(symbol: str, res: str = "1D", bars: int = 180):
                 round(float(atr.iloc[-1] / close.iloc[-1] * 100), 2),
                 "last": float(close.iloc[-1])},
         "analyst": dict(ana) if ana else None,
+        "analyst_hist": ana_hist,
         "position": dict(pos) if pos else None,
         "trades": trades,
         "live": _markets()["markets"].get(symbol),
@@ -223,7 +269,7 @@ def api_run():
 
     def go():
         try:
-            runner.run_cycle(notify=notify.send)
+            runner.run_cycle(notify=notify.send, force=True)
             _cache["signals_ts"] = 0.0  # refresh analyst/signal cache
         finally:
             _run_lock.release()
@@ -266,6 +312,7 @@ def api_state():
     analyst_rows = [dict(r) for r in conn.execute(
         "SELECT * FROM analyst WHERE id IN (SELECT MAX(id) FROM analyst GROUP BY symbol)")]
     halted = state.get_setting(conn, "halted", "0") == "1"
+    peak = state.peak_equity(conn)
     conn.close()
 
     def stats(sub):
@@ -284,6 +331,8 @@ def api_state():
         "stats_all": stats(trades),
         "stats_signal": stats([t for t in trades if "llm_conviction" not in (t["meta"] or "")]),
         "stats_llm": stats([t for t in trades if "llm_conviction" in (t["meta"] or "")]),
+        "peak": peak,
+        "drawdown_pct": round((min([e["value"] for e in equity] or [cash]) / peak - 1) * 100, 1) if peak else 0,
         "now": int(time.time()),
     })
 
@@ -497,8 +546,19 @@ async function pgMarkets(){
  <div id="mkt" class="card"><div class="sub">…</div></div>`;
  await refreshLive(); await mktFill();
 }
+let mktSort={k:null,desc:false};
+function sortMkt(k){mktSort={k,desc:mktSort.k===k?!mktSort.desc:false};mktFill()}
 async function mktFill(){
- const rows=Object.entries(MK.markets).map(([sym,m])=>{
+ let ents=Object.entries(MK.markets);
+ if(mktSort.k){const k=mktSort.k;const val=(sym,m)=>{
+   if(k==='sym')return sym;
+   if(k==='er')return (SG.signals[sym]||{}).er??-9;
+   if(k==='ret20_pct')return (SG.signals[sym]||{}).ret20_pct??-9;
+   return m[k]??-9;};
+  ents.sort((a,b)=>{const va=val(a[0],a[1]),vb=val(b[0],b[1]);
+   return (typeof va==='string')?va.localeCompare(vb)*(mktSort.desc?-1:1)
+     :(mktSort.desc?vb-va:va-vb);});}
+ const rows=ents.map(([sym,m])=>{
   const s=SG.signals[sym]||{};
   if(sym==='USDTTMN'){
    return `<tr style="cursor:pointer" onclick="location.hash='#/coin/USDTTMN'">
@@ -521,9 +581,11 @@ async function mktFill(){
    <td>${above==null?'—':above&&s.er>=0.3?'<span class="chip c-amb"> آماده ورود</span>':''}</td></tr>`;
  }).join('');
  document.getElementById('mkt').innerHTML=`<table><thead><tr>
-  <th>نماد</th><th>قیمت لایو</th><th>۲۴ساعت</th><th>حجم ۲۴س</th><th>رژیم (SMA200)</th>
-  <th>ER</th><th>بازده ۲۰روز</th><th>تحلیل AI</th><th>سیگنال</th></tr></thead><tbody>${rows}</tbody></table>
-  <div style="margin-top:8px;font-size:11px;color:var(--dim2)">حجم: دلار/روز — ER نزدیک ۱ = روند تمیز. «آماده ورود» یعنی شرط‌های قانون ورود فعال است.</div>`;
+  <th onclick="sortMkt('sym')">نماد ⌄</th><th onclick="sortMkt('last')">قیمت لایو ⌄</th>
+  <th onclick="sortMkt('ch24')">۲۴ساعت ⌄</th><th onclick="sortMkt('vol24_quote')">حجم ۲۴س ⌄</th>
+  <th>رژیم (SMA200)</th><th onclick="sortMkt('er')">ER ⌄</th>
+  <th onclick="sortMkt('ret20_pct')">بازده ۲۰روز ⌄</th><th>تحلیل AI</th><th>سیگنال</th></tr></thead><tbody>${rows}</tbody></table>
+  <div style="margin-top:8px;font-size:11px;color:var(--dim2)">حجم: دلار/روز — ER نزدیک ۱ = روند تمیز. «آماده ورود» یعنی شرط‌های قانون ورود فعال است. روی سرستون‌ها برای مرتب‌سازی کلیک کن.</div>`;
 }
 /* ---------------- coin detail ---------------- */
 async function pgCoin(sym){
@@ -567,6 +629,11 @@ async function coinFill(sym,res){
     <div class="mono" style="margin-top:8px">حمایت: ${a.support||'—'} · مقاومت: ${a.resistance||'—'}</div>
     <p class="summary" style="margin-top:8px;font-size:12.5px">${a.summary||''}</p>
     <div class="mono" style="color:var(--dim2)">${faT(a.ts)}</div></div>`:'<div class="sub">هنوز نظری ثبت نشده</div>'}</div>
+   <div class="card"><h3>🗂 سابقهٔ نظرهای AI</h3>
+   <table><thead><tr><th>تاریخ</th><th>گرایش</th><th>اطمینان</th><th>خلاصه</th></tr></thead>
+   <tbody>${(d.analyst_hist||[]).map(h=>`<tr><td>${faT(h.ts)}</td><td>${biasChip(h.bias)}</td>
+    <td>${Math.round((h.confidence||0)*100)}%</td><td class="summary">${h.summary||''}</td></tr>`).join('')
+    ||'<tr><td colspan=4>—</td></tr>'}</tbody></table></div>
    <div class="card"><h3>📒 معاملات آزمایشی این کوین</h3>
    <table><thead><tr><th>ورود</th><th>خروج</th><th>بازده%</th><th>دلیل</th><th>نوع</th></tr></thead>
    <tbody>${d.trades.map(t=>`<tr><td>${fmtP(t.entry_px)}</td><td>${fmtP(t.exit_px)}</td>
@@ -654,8 +721,15 @@ async function pgSettings(){
  </div>`;
 }
 /* ---------------- actions ---------------- */
-async function doRun(){toast('چرخه شروع شد — چند دقیقه طول می‌کشد');await fetch('/api/run',{method:'POST'});
- setTimeout(()=>{render();},20000)}
+async function doRun(){
+ const d0=await jget('/api/state');const t0=d0.decisions.length?d0.decisions[0].ts:0;
+ toast('چرخه شروع شد…');
+ await fetch('/api/run',{method:'POST'});
+ let tries=0;const iv=setInterval(async()=>{
+  tries++;const d=await jget('/api/state');
+  if(d.decisions.length&&d.decisions[0].ts>t0){clearInterval(iv);toast('چرخه تمام شد ✓');render();}
+  else if(tries>60){clearInterval(iv);toast('پایان انتظار');render();}
+ },5000)}
 async function doHalt(){const s=await jget('/api/settings');
  await fetch(s.halted?'/api/resume':'/api/halt',{method:'POST'});
  toast(s.halted?'ادامه یافت':'متوقف شد');render()}

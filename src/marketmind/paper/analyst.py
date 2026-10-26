@@ -35,7 +35,8 @@ PREMIUM_HELP = (
 
 
 def build_context(symbol: str, df: pd.DataFrame, prem_z: float | None,
-                  position: dict | None, cfg: dict) -> str:
+                  position: dict | None, cfg: dict,
+                  memory: list[dict] | None = None) -> str:
     tail = df.tail(40)
     close = df["close"]
     sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
@@ -54,6 +55,15 @@ def build_context(symbol: str, df: pd.DataFrame, prem_z: float | None,
         f"موقعیت LONG باز: ورود {position['entry_px']:.6g}، وثیقه {position['collateral']:.1f}$، "
         f"لیکویید {position['liq_px']:.6g}")
     prem_line = "" if prem_z is None else f"- {PREMIUM_HELP}\n  مقدار فعلی: {prem_z:+.2f}"
+    if memory:
+        lines = ["سابقهٔ نظرهای قبلی خودت و آنچه بعدش شد (بازده قیمت از آن روز تا امروز):"]
+        for m in memory:
+            lines.append(f"- {pd.Timestamp(m['date'], unit='s', tz='UTC').date()}: "
+                         f"گفتی {m['bias']} با اطمینان {m['confidence']:.0%} → "
+                         f"قیمت از آن زمان {m['outcome_pct']:+.1f}%")
+        mem_block = "\n".join(lines) + "\n(از این سابقه بیاموز: اگر مدام اشتباه گفته‌ای محتاط‌تر باش.)"
+    else:
+        mem_block = ""
 
     return f"""نماد: {symbol} (بازار تعهدی والکس، جفت USDT)
 قیمت روزهای اخیر (UTC):
@@ -67,6 +77,7 @@ def build_context(symbol: str, df: pd.DataFrame, prem_z: float | None,
 - بازده 20روزه: {ret20 * 100:+.1f}%
 - نوسان روزانه 30روزه: {vol30:.2f}%
 {prem_line}
+{mem_block}
 وضعیت حساب ما: {pos_txt}
 سیگنال قطعی سیستم (کانال دونچین 20 + فیلترها): ورود={'بله' if cfg['entry_sig'] else 'خیر'}، خروج={'بله' if cfg['exit_sig'] else 'خیر'}
 محدودیت‌های سخت: حداکثر اهرم 3، حداکثر ریسک هر معامله 2% سرمایه، سقف ارزش موقعیت 1700$.
@@ -74,10 +85,10 @@ JSON تحلیلی‌ات را بده."""
 
 
 def analyze(symbol: str, df: pd.DataFrame, prem_z: float | None,
-            position: dict | None, cfg: dict) -> dict:
+            position: dict | None, cfg: dict, memory: list[dict] | None = None) -> dict:
     """One structured opinion. Never raises; returns neutral fallback on failure."""
     try:
-        raw = llm.chat(SYSTEM, build_context(symbol, df, prem_z, position, cfg),
+        raw = llm.chat(SYSTEM, build_context(symbol, df, prem_z, position, cfg, memory),
                        temperature=0.2, max_tokens=1500)
         data = llm.parse_json_loose(raw)
         bias = data.get("bias", "neutral")

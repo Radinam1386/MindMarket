@@ -100,6 +100,29 @@ def save_analyst(conn: sqlite3.Connection, symbol: str, a: dict) -> None:
     conn.commit()
 
 
+def recent_analyst(conn: sqlite3.Connection, symbol: str, limit: int = 3) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT ts, bias, confidence, entry_ok, summary FROM analyst"
+        " WHERE symbol=? ORDER BY id DESC LIMIT ?", (symbol, limit))]
+
+
+def analyst_today(conn: sqlite3.Connection, symbol: str) -> bool:
+    day_start = int(time.time()) - (int(time.time()) % 86400)
+    row = conn.execute("SELECT 1 FROM analyst WHERE symbol=? AND ts>=? LIMIT 1",
+                       (symbol, day_start)).fetchone()
+    return row is not None
+
+
+def peak_equity(conn: sqlite3.Connection) -> float:
+    row = conn.execute("SELECT COALESCE(MAX(value),0) m FROM equity").fetchone()
+    return float(row["m"])
+
+
+def last_cycle_day(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute("SELECT MAX(ts) m FROM decisions").fetchone()
+    return int(row["m"]) if row and row["m"] else None
+
+
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)

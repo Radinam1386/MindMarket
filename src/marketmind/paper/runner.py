@@ -48,14 +48,36 @@ PAPER_CFG = {
 }
 
 
-def live_price(client: WallexPublicClient, symbol: str) -> float:
+SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
+
+
+def live_quote(client: WallexPublicClient, symbol: str) -> dict:
+    """Best-effort quote: mid from markets snapshot, fallback to last trade."""
+    try:
+        symbols = client.markets()
+        st = symbols.get(symbol, {}).get("stats", {})
+        bid = float(st.get("bidPrice") or 0)
+        ask = float(st.get("askPrice") or 0)
+        last = float(st.get("lastPrice") or 0)
+        if bid and ask:
+            return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2, "last": last or (bid + ask) / 2}
+        if last:
+            return {"bid": last, "ask": last, "mid": last, "last": last}
+    except Exception:
+        pass
     trades = client.trades(symbol)
-    if trades:
-        return float(trades[0]["price"])
-    depth = client.depth(symbol)
-    bid = float(depth["bid"][0]["price"]) if depth.get("bid") else 0.0
-    ask = float(depth["ask"][0]["price"]) if depth.get("ask") else 0.0
-    return (bid + ask) / 2 or 0.0
+    px = float(trades[0]["price"]) if trades else 0.0
+    return {"bid": px, "ask": px, "mid": px, "last": px}
+
+
+def entry_fill(q: dict) -> float:
+    """We are takers buying: pay the ask plus slippage."""
+    return q["ask"] * (1 + SLIPPAGE) if q["ask"] else q["mid"]
+
+
+def exit_fill(q: dict) -> float:
+    """Closing a long sells into the bid minus slippage."""
+    return q["bid"] * (1 - SLIPPAGE) if q["bid"] else q["mid"]
 
 
 def refresh_candles(client: WallexPublicClient) -> dict[str, pd.DataFrame]:
@@ -88,7 +110,7 @@ def atr_of(df: pd.DataFrame) -> float:
     return float(v) if v == v else 0.0
 
 
-def run_cycle(notify=None) -> dict:
+def run_cycle(notify=None, force: bool = False) -> dict:
     client = WallexPublicClient()
     conn = state.connect()
     state.init_account(cash=200.0)
@@ -98,6 +120,14 @@ def run_cycle(notify=None) -> dict:
         return {"ts": int(time.time()), "equity": equity, "open": 0, "closed": 0,
                 "positions": [],
                 "lines": ["⛔ HALTED — no actions (resume from dashboard)"]}
+
+    if not force:
+        last = state.last_cycle_day(conn)
+        if last and (int(time.time()) - last) < 20 * 3600:
+            conn.close()
+            return {"ts": int(time.time()), "equity": state.account_cash(conn),
+                    "open": 0, "closed": 0, "positions": [],
+                    "lines": ["⏭ today's cycle already ran (use force to override)"]}
 
     frames = refresh_candles(client)
     prem_df = ingest.load_candles("USDTTMN", "1D")
@@ -112,25 +142,50 @@ def run_cycle(notify=None) -> dict:
         sig = donchian_er(df, entry_n=PAPER_CFG["entry_n"], exit_n=PAPER_CFG["exit_n"],
                           er_n=PAPER_CFG["er_n"], er_min=PAPER_CFG["er_min"],
                           sma_n=PAPER_CFG["sma_n"])
-        px = live_price(client, sym)
+        try:
+            quote = live_quote(client, sym)
+        except Exception as e:
+            state.record_decision(conn, sym, "skip", {"why": f"quote error: {e}"})
+            continue
+        px = quote["mid"]
         prices[sym] = px
         entry_sig = bool(sig["long_entry"].iloc[-1])
         exit_sig = bool(sig["long_exit"].iloc[-1])
 
         pos = conn.execute("SELECT * FROM positions WHERE symbol=?", (sym,)).fetchone()
 
-        # 0) LLM analyst opinion (advisory; stored for scoring)
+        # 0) LLM analyst opinion (cached per day; memory of its past calls)
         opinion = None
         if PAPER_CFG["use_llm"]:
-            opinion = analyst.analyze(sym, df, prem_z, dict(pos) if pos else None,
-                                      {"entry_sig": entry_sig, "exit_sig": exit_sig})
-            state.save_analyst(conn, sym, opinion)
+            if state.analyst_today(conn, sym):
+                rows = state.recent_analyst(conn, sym, 1)
+                if rows:
+                    r0 = rows[0]
+                    opinion = {"bias": r0["bias"], "confidence": r0["confidence"],
+                               "entry_ok": bool(r0["entry_ok"]),
+                               "size_factor": r0["size_factor"] or 0.5,
+                               "key_levels": {"support": r0["support"],
+                                              "resistance": r0["resistance"]},
+                               "summary": r0["summary"], "ok": True, "cached": True}
+            else:
+                memory = []
+                now_px = float(df["close"].iloc[-1])
+                for r in state.recent_analyst(conn, sym, 3):
+                    hist = df[df["ts"] <= r["ts"] + 86400]
+                    then_px = float(hist["close"].iloc[-1]) if len(hist) else now_px
+                    memory.append({"date": r["ts"], "bias": r["bias"],
+                                   "confidence": r["confidence"],
+                                   "outcome_pct": round((now_px / then_px - 1) * 100, 1)})
+                opinion = analyst.analyze(sym, df, prem_z, dict(pos) if pos else None,
+                                          {"entry_sig": entry_sig, "exit_sig": exit_sig},
+                                          memory=memory)
+                state.save_analyst(conn, sym, opinion)
 
         # 1) liquidation watch (deterministic, always)
         if pos is not None:
-            if (pos["side"] == "long" and px <= pos["liq_px"]) or \
-               (pos["side"] == "short" and px >= pos["liq_px"]):
-                res = state.close_position(conn, pos["id"], px, "liquidated")
+            if (pos["side"] == "long" and quote["bid"] <= pos["liq_px"]) or \
+               (pos["side"] == "short" and quote["ask"] >= pos["liq_px"]):
+                res = state.close_position(conn, pos["id"], exit_fill(quote), "liquidated")
                 state.record_decision(conn, sym, "liquidate",
                                       {"px": px, **{k: round(v, 4) for k, v in res.items()}})
                 closed.append(f"⛔ {sym} LIQUIDATED {res['return_pct']:+.1f}%")
@@ -138,7 +193,7 @@ def run_cycle(notify=None) -> dict:
 
         # 2) exits (deterministic; LLM cannot block)
         if pos is not None and exit_sig:
-            res = state.close_position(conn, pos["id"], px, "signal")
+            res = state.close_position(conn, pos["id"], exit_fill(quote), "signal")
             state.record_decision(conn, sym, "close",
                                   {"px": px, "signal": "chan10_exit",
                                    **{k: round(v, 4) for k, v in res.items()}})
@@ -168,7 +223,7 @@ def run_cycle(notify=None) -> dict:
                         state.record_decision(conn, sym, "skip",
                                               {"why": "below min notional"})
                     else:
-                        state.open_position(conn, sym, "long", px, coll,
+                        state.open_position(conn, sym, "long", entry_fill(quote), coll,
                                             PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
                                             MARGIN_LIQ_OFFSET,
                                             meta={"strategy": "chan10+sma200",
@@ -198,7 +253,7 @@ def run_cycle(notify=None) -> dict:
                         state.record_decision(conn, sym, "skip",
                                               {"why": "below min notional"})
                     else:
-                        state.open_position(conn, sym, "long", px, coll,
+                        state.open_position(conn, sym, "long", entry_fill(quote), coll,
                                             PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
                                             MARGIN_LIQ_OFFSET,
                                             meta={"strategy": "llm_conviction",
@@ -220,6 +275,14 @@ def run_cycle(notify=None) -> dict:
                                    "llm_bias": (opinion or {}).get("bias")})
 
     equity = state.snapshot_equity(conn, prices)
+    auto_halted = False
+    peak = state.peak_equity(conn)
+    if peak > 0 and equity < peak * 0.90:
+        state.set_setting(conn, "halted", "1")
+        auto_halted = True
+        summary_lines_extra = [f"⛔ AUTO-HALT: equity {equity:.2f} is >10% below peak {peak:.2f}"]
+    else:
+        summary_lines_extra = []
     summary = {"ts": int(time.time()), "equity": round(equity, 2),
                "open": len(opened), "closed": len(closed),
                "positions": [r["symbol"] for r in
@@ -228,6 +291,8 @@ def run_cycle(notify=None) -> dict:
                         [f"holding: {', '.join(held) or '-'}",
                          f"premium_z: {prem_z:+.2f}" if prem_z is not None else "premium_z: n/a",
                          f"equity: {equity:.2f} USDT"]}
+    summary["lines"] = summary["lines"] + summary_lines_extra
+    summary["auto_halted"] = auto_halted
     if notify:
         try:
             notify("\n".join(["🧠 MarketMind paper (hybrid)"] + summary["lines"]))

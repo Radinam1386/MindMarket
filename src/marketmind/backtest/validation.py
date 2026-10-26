@@ -20,19 +20,24 @@ IS_END = "2024-01-01"  # UTC; OOS starts here
 
 def segment_metrics(eq: pd.Series) -> dict:
     if len(eq) < 3:
-        return {"return_pct": 0.0, "max_dd_pct": 0.0, "sharpe": 0.0, "bars": len(eq)}
+        return {"return_pct": 0.0, "max_dd_pct": 0.0, "sharpe": 0.0, "calmar": 0.0, "bars": len(eq)}
     rets = eq.pct_change().dropna()
     total = eq.iloc[-1] / eq.iloc[0] - 1
     dd = (eq / eq.cummax() - 1).min()
+    # unit-safe annualization (pandas 3 datetime resolution is not ns — asi8 broke it)
+    secs = eq.index.to_series().diff().dt.total_seconds().median()
+    bars_per_year = 365.25 * 86400 / secs if secs and secs > 0 else 365.25
     if rets.std() == 0:
         sharpe = 0.0
     else:
-        bars_per_year = 365.25 * 86400 / np.median(np.diff(eq.index.asi8) / 1e9)
         sharpe = float(rets.mean() / rets.std() * np.sqrt(bars_per_year))
+    years = max(len(eq) / bars_per_year, 1e-9)
+    cagr = (1 + total) ** (1 / years) - 1 if total > -1 else -1.0
     return {
         "return_pct": round(total * 100, 1),
         "max_dd_pct": round(dd * 100, 1),
         "sharpe": round(sharpe, 2),
+        "calmar": round(cagr / abs(dd), 2) if dd < 0 else 0.0,
         "bars": len(eq),
     }
 

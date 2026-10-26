@@ -61,6 +61,8 @@ Data lives in `data/` (gitignored). Reports in `docs/reports/`.
       Telegram notifier (awaiting bot credentials), daily 04:30 automation
 - [x] E016 hybrid: LLM analyst in the loop (veto/size-down + tagged conviction entries,
       never blocks exits) + dashboard v2 (live prices, AI panel, run-now, halt/resume)
+- [x] Deployment bundle ready & smoke-tested: deploy/Dockerfile (image builds, serves,
+      seeds data, survives restarts), liara.yaml, docs/DEPLOY.md — awaiting Liara API token
 - [ ] Judgment: ≥8 weeks forward paper results → evidence dossier → owner approval gates
       (rules-vs-AI per-path stats tracked on the dashboard)
 

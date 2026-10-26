@@ -321,3 +321,33 @@ Implemented (paper stage, hard-risk envelope unchanged):
 Live-trading note (unchanged contract): Wallex key, when provided (file-based, trade-only,
 no-withdrawal, IP-allowlisted), activates ONLY after ≥8 weeks paper evidence + dossier +
 explicit owner approval.
+
+---
+
+## E017 — Correction + hardening round (2026-10-25)
+
+**METRIC CORRECTION (important):** `segment_metrics` annualized Sharpe using
+`DatetimeIndex.asi8`, whose unit changed in pandas 3 (not nanoseconds) — every
+"portfolio Sharpe" printed by E008–E011 validations was inflated ~31×.
+True values: E008a OOS Sharpe ≈ 0.77 (not 24.3); E011 portfolio OOS ≈ 0.58 (not 18.2).
+Verdict changes: E008a's "Sharpe>1 PASS" line was bogus (now would FAIL); E011's PASS
+included that bogus line — E011 was independently downgraded by Red-Team (E012) anyway.
+Fix: unit-safe annualization via total_seconds(); regression test pins Sharpe<3 for a
+10%-vol series. Trade counts / expectancy / maxDD criteria were unaffected.
+
+**Runner hardening (paper heart):**
+- per-symbol error isolation (one bad symbol can no longer kill the cycle)
+- idempotency: cycle skips if already ran in the last 20h (cron) — dashboard run uses
+  force=True (manual = intent)
+- realistic fills: entries at ask+0.05% slippage, exits at bid−0.05%; liquidation watch
+  uses the bid
+- **auto-halt risk engine**: if equity falls >10% below peak → halted=1 + Telegram alert
+  (plan §13 daily-loss halt, paper edition)
+
+**Agentic upgrade — AI memory:** the analyst now receives its own last 3 opinions per
+symbol WITH realized price outcomes ("گفتی صعودی ۶۰٪ → قیمت از آن روز −۴/۲٪") and an
+instruction to learn from misses; per-day opinion caching saves duplicate LLM calls.
+
+**Dashboard:** AI opinion history per coin, run-button polls until the cycle actually
+finishes, sortable market table, peak/drawdown fields exposed.
+Tests: 36 green (Sharpe sanity, bid/ask fills, peak/analyst helpers, idempotency data).

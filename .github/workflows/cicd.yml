@@ -1,0 +1,44 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          pip install -r deploy/requirements.txt pytest
+          pip install --no-deps --no-build-isolation .
+      - name: Run tests
+        run: pytest -q
+        env:
+          MARKETMIND_ROOT: ${{ github.workspace }}
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Liara CLI
+        run: npm install -g @liara/cli
+      - name: Deploy to Liara
+        run: |
+          liara deploy \
+            --app "${{ vars.LIARA_APP || 'marketmind' }}" \
+            --region "${{ vars.LIARA_REGION || 'iran' }}" \
+            --docker deploy/Dockerfile \
+            --token "${{ secrets.LIARA_API_TOKEN }}"
+      - name: Deployment summary
+        run: echo "🚀 deployed ${{ github.sha }} to ${{ vars.LIARA_APP || 'marketmind' }}"
