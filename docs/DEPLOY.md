@@ -34,10 +34,10 @@ npm install -g @liara/cli   # یا: curl -fsSL https://cli.liara.ir | bash
 liara login --token LIARA_API_TOKEN
 
 # ۲) ساخت دیسک دائمی (یک بار)
-liara disk create --name marketmind-data --size 1 # گیگابایت
+liara disk create --name marketmind-data --size 1 --api-token LIARA_API_TOKEN  # یک‌گیگابایت
 
 # ۳) دیپلوی از ریشهٔ پروژه (liara.yaml تنظیم است)
-liara deploy --app marketmind --image marketmind --docker ./deploy/Dockerfile
+liara deploy --app marketmind --build-location iran --dockerfile deploy/Dockerfile --port 8787 --disks marketmind-data=/app/data --detach
 
 # ۴) پس از بالا آمدن: دو فایل راز را با فایل‌منیجر کنسول لیارا در /app/data/secrets/ بگذارید:
 #    - llm_api.json   (همان که لوکال دارید)
@@ -59,7 +59,7 @@ git pull && liara deploy --app marketmind ...
 | نشانه | علت احتمالی | راه‌حل |
 |---|---|---|
 | 401 روی `/` | توکن در URL نیست/غلط است | `?token=...` با محتوای فایل دیسک |
-| داده‌ها بعد از ریدپلوی خالی | دیسک ماونت نشده | liara.yaml → disks → mountTo /app/data |
+| داده‌ها بعد از ریدپلوی خالی | دیسک ماونت نشده | liara.json → disks → mountTo /app/data |
 | AI همیشه «تحلیل ناموفق» | llm_api.json روی دیسک نیست/شبکه | فایل را بگذارید + ری‌استارت |
 | چرخه روزانه اجرا نمی‌شود | MARKETMIND_SCHEDULER حذف شده | در Dockerfile بماند؛ لاگ اپ را ببینید |
 | تلگرام ارسال نمی‌شود | بلاک از IP ایران | base_url پروکسی یا صرف‌نظر |

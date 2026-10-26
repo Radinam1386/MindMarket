@@ -37,8 +37,11 @@ jobs:
         run: |
           liara deploy \
             --app "${{ vars.LIARA_APP || 'marketmind' }}" \
-            --region "${{ vars.LIARA_REGION || 'iran' }}" \
-            --docker deploy/Dockerfile \
-            --token "${{ secrets.LIARA_API_TOKEN }}"
+            --build-location "${{ vars.LIARA_REGION || 'iran' }}" \
+            --dockerfile deploy/Dockerfile \
+            --port 8787 \
+            --disks marketmind-data=/app/data \
+            --api-token "${{ secrets.LIARA_API_TOKEN }}" \
+            --detach
       - name: Deployment summary
         run: echo "🚀 deployed ${{ github.sha }} to ${{ vars.LIARA_APP || 'marketmind' }}"
