@@ -66,6 +66,7 @@ PAPER_CFG["max_positions"] = int(_env_float("MARKETMIND_MAX_POSITIONS",
                                             PAPER_CFG["max_positions"]))
 PAPER_CFG["cycle_interval_min"] = max(1.0, _env_float("MARKETMIND_CYCLE_MINUTES", 15.0))
 PAPER_CFG["allow_shorts"] = os.environ.get("MARKETMIND_ALLOW_SHORTS", "0") == "1"
+PAPER_CFG["min_notional"] = _env_float("MARKETMIND_MIN_NOTIONAL", PAPER_CFG["min_notional"])
 
 
 SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
