@@ -18,7 +18,13 @@ jobs:
           pip install -r deploy/requirements.txt pytest
           pip install --no-deps --no-build-isolation .
       - name: Run tests
-        run: pytest -q
+        run: |
+          set -o pipefail
+          pytest -q --tb=short 2>&1 | tee pytest.out || {
+            echo "::error::$(grep -m1 -E 'Error|FAILED' pytest.out | head -c 300)"
+            tail -30 pytest.out
+            exit 1
+          }
         env:
           MARKETMIND_ROOT: ${{ github.workspace }}
 
