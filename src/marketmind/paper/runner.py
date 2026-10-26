@@ -191,6 +191,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         sma200_now = float(df["close"].rolling(PAPER_CFG["sma_n"]).mean().shift(1).iloc[-1])
         upper_prev = float(df["high"].rolling(PAPER_CFG["entry_n"]).max().shift(1).iloc[-1])
         lower_prev = float(df["low"].rolling(PAPER_CFG["exit_n"]).min().shift(1).iloc[-1])
+        short_exit_px = float(df["high"].rolling(PAPER_CFG["exit_n"]).max().shift(1).iloc[-1])
         gate_detail = {"er": (round(float(er_now), 3) if er_now == er_now else None),
                        "er_min": PAPER_CFG["er_min"],
                        "above_sma200": bool(close_daily > sma200_now),
