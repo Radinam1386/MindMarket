@@ -65,3 +65,37 @@ def test_idempotency_guard_data(tmp_path, monkeypatch):
     assert state.last_cycle_day(conn) is not None
     assert int(time.time()) - state.last_cycle_day(conn) < 20 * 3600  # guard would trigger
     conn.close()
+
+
+def test_spread_pct_and_cooldown(tmp_path, monkeypatch):
+    from marketmind.paper.runner import spread_pct, cooldown_until, recent_entries
+
+    assert spread_pct({"bid": 100.0, "ask": 100.2, "mid": 100.1}) == pytest.approx(0.1998, rel=1e-2)
+    assert spread_pct({"bid": 0, "ask": 0, "mid": 0}) == 0.0
+
+    monkeypatch.setattr(state, "DB_PATH", tmp_path / "cd.sqlite")
+    conn = state.connect(); state.init_account(cash=200.0)
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO trades (symbol, side, entry_ts, exit_ts, entry_px, exit_px, qty,"
+        " collateral, leverage, interest, fees, return_pct, close_reason, meta)"
+        " VALUES ('BTCUSDT','long',?,?,?,?,?,1,3,0,0,-4.0,'signal','{}')",
+        (now - 86400, now - 43200, 100.0, 96.0, 0.001))
+    conn.commit()
+    until = cooldown_until(conn, "BTCUSDT", 3)
+    assert until > now  # blocked for ~3 more days
+    assert cooldown_until(conn, "ETHUSDT", 3) == 0  # no history
+    assert recent_entries(conn, 7) == 1
+    conn.close()
+
+
+def test_take_profit_meta_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(state, "DB_PATH", tmp_path / "tp.sqlite")
+    conn = state.connect(); state.init_account(cash=200.0)
+    import json as _j
+    pid = state.open_position(conn, "BTCUSDT", "long", price=80000.0, collateral=40.0,
+                              leverage=3.0, liq_frac=0.8546, liq_offset=0.0045,
+                              meta={"tp_px": 82000.0})
+    pos = conn.execute("SELECT meta FROM positions WHERE id=?", (pid,)).fetchone()
+    assert _j.loads(pos["meta"])["tp_px"] == 82000.0
+    conn.close()

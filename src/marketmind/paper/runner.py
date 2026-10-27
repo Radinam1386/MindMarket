@@ -49,6 +49,17 @@ PAPER_CFG = {
     "er_min": 0.30,
     "sma_n": 200,
     "use_llm": True,
+    # --- v2.2 anti-churn & quality gates ---
+    "max_spread_pct": 0.15,        # skip entries when spread is too wide
+    "atr_pct_min": 0.5,            # dead market: skip
+    "atr_pct_max": 8.0,            # chaotic market: skip
+    "cooldown_days_after_loss": 3, # don't re-enter a symbol right after a loss
+    "max_new_per_cycle": 1,        # at most one NEW position per cycle
+    "max_entries_7d": 3,           # rolling weekly entry budget
+    "prem_veto_z": 1.5,            # risk-off: no new longs when tether premium spikes
+    "take_profit_atr": 2.5,        # lock gains at +2.5 ATR (fixes weak exits)
+    "ai_trust_min_accuracy": 0.4,  # conviction entries/vetoes need this hit-rate
+    "auto_halt_dd_pct": 8.0,       # tighter than 10% for a 200$ account
 }
 
 
@@ -143,6 +154,54 @@ def sizing(cash_total: float, price: float, atr: float, cap_frac: float | None =
     return c
 
 
+def spread_pct(q: dict) -> float:
+    if q.get("bid") and q.get("ask") and q["mid"]:
+        return (q["ask"] - q["bid"]) / q["mid"] * 100
+    return 0.0
+
+
+def recent_entries(conn, days: int = 7) -> int:
+    since = int(time.time()) - days * 86400
+    row = conn.execute("SELECT COUNT(*) c FROM trades WHERE entry_ts >= ?", (since,)).fetchone()
+    return int(row["c"])
+
+
+def cooldown_until(conn, symbol: str, days: int) -> int:
+    """timestamp until which re-entry on `symbol` is blocked (after a losing close)."""
+    row = conn.execute(
+        "SELECT exit_ts, return_pct FROM trades WHERE symbol=? ORDER BY exit_ts DESC LIMIT 1",
+        (symbol,)).fetchone()
+    if row and row["return_pct"] < 0:
+        return int(row["exit_ts"]) + days * 86400
+    return 0
+
+
+def ai_trust(conn, df: pd.DataFrame, min_acc: float, window: int = 10) -> dict:
+    """Directional accuracy of the analyst's last opinions vs realized 3-day moves.
+    None = not enough samples (trust allowed but conviction off)."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT ts, bias, confidence FROM analyst ORDER BY id DESC LIMIT ?", (window,))]
+    scored = []
+    now_px = float(df["close"].iloc[-1])
+    for r in rows:
+        hist = df[df["ts"] <= r["ts"] + 3 * 86400]
+        if hist.empty:
+            continue
+        then_px = float(hist["close"].iloc[-1])
+        if then_px <= 0:
+            continue
+        moved = (now_px / then_px - 1) * 100
+        said_up = r["bias"] == "bullish"
+        went_up = moved > 0
+        if r["bias"] != "neutral" and abs(moved) > 0.5:  # only score meaningful calls
+            scored.append(1.0 if said_up == went_up else 0.0)
+    if len(scored) < 5:
+        return {"accuracy": None, "n": len(scored), "trusted": False, "conviction": False}
+    acc = sum(scored) / len(scored)
+    return {"accuracy": round(acc, 2), "n": len(scored),
+            "trusted": acc >= min_acc, "conviction": acc >= max(min_acc, 0.55)}
+
+
 def atr_of(df: pd.DataFrame) -> float:
     tr = (df["high"] - df["low"]).rolling(PAPER_CFG["atr_n"]).mean()
     v = tr.iloc[-2] if len(tr) >= 2 else float("nan")  # last CLOSED bar's ATR
@@ -185,7 +244,9 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 "lines": [f"❌ candle refresh failed: {e}"]}
     prem_df = ingest.load_candles("USDTTMN", "1D")
     prem_z = analyst.premium_z_now(prem_df) if prem_df is not None else None
-    prices, opened, closed, held = {}, [], [], []
+    prices, opened, closed, held, held_gate = {}, [], [], [], []
+    new_this_cycle = 0
+    ai_t = None  # analyst trust computed per-symbol below
 
     for sym in ASSETS:
         df = frames[sym]
@@ -252,6 +313,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 if not opinion.get("ok"):
                     events.record("warn", "llm",
                                   f"{sym}: تحلیل AI ناموفق — {opinion.get('summary', '')[:200]}")
+                ai_t = ai_trust(conn, df, PAPER_CFG["ai_trust_min_accuracy"])
 
         # 1) liquidation watch (deterministic, always)
         if pos is not None:
@@ -319,6 +381,22 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             closed.append(f"🔒 {sym} closed short {res['return_pct']:+.1f}%")
             pos = None
 
+        # 2.5) take-profit (deterministic; LLM cannot block)
+        if pos is not None:
+            try:
+                pmeta = json.loads(pos["meta"] or "{}")
+                tp_px = pmeta.get("tp_px")
+            except Exception:
+                tp_px = None
+            if tp_px and ((pos["side"] == "long" and quote["bid"] >= tp_px) or
+                          (pos["side"] == "short" and quote["ask"] <= tp_px)):
+                res = state.close_position(conn, pos["id"], exit_fill(quote), "take_profit")
+                state.record_decision(conn, sym, "close",
+                                      {"px": px, "tp_px": round(tp_px, 6),
+                                       **{k: round(v, 4) for k, v in res.items()}})
+                closed.append(f"🎯 {sym} TP {res['return_pct']:+.1f}%")
+                pos = None
+
         # 3) entries
         if pos is None:
             n_open = conn.execute("SELECT COUNT(*) c FROM positions").fetchone()["c"]
@@ -328,14 +406,37 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             allow_shorts = PAPER_CFG.get("allow_shorts", False)
             short_breakdown = bool(close_daily < lower_prev)
 
+            # v2.2 quality gates (shared by both entry paths)
+            gate = None
+            spread = spread_pct(quote)
+            atr_pct = (atr / px * 100) if (atr and px) else None
+            if spread > PAPER_CFG["max_spread_pct"]:
+                gate = f"spread {spread:.2f}% > {PAPER_CFG['max_spread_pct']}%"
+            elif atr_pct is None or atr_pct < PAPER_CFG["atr_pct_min"]:
+                gate = f"atr_pct {atr_pct} too low (dead market)"
+            elif atr_pct > PAPER_CFG["atr_pct_max"]:
+                gate = f"atr_pct {atr_pct:.1f}% too high (chaos)"
+            elif prem_z is not None and prem_z > PAPER_CFG["prem_veto_z"]:
+                gate = f"prem_z {prem_z:+.1f} risk-off (no new longs)"
+            elif n_open >= PAPER_CFG["max_positions"]:
+                gate = "max_positions"
+            elif new_this_cycle >= PAPER_CFG["max_new_per_cycle"]:
+                gate = "cycle budget (1 new/cycle)"
+            elif recent_entries(conn, 7) >= PAPER_CFG["max_entries_7d"]:
+                gate = "weekly budget (3/7d)"
+            elif time.time() < cooldown_until(conn, sym, PAPER_CFG["cooldown_days_after_loss"]):
+                gate = f"cooldown after loss ({PAPER_CFG['cooldown_days_after_loss']}d)"
+            if gate:
+                state.record_decision(conn, sym, "skip", {"why": gate})
+                held_gate.append(sym)
+                continue
+
             if entry_sig:
                 # deterministic signal; LLM may veto or scale size down only
-                if opinion is not None and opinion["ok"] and not opinion["entry_ok"]:
+                if opinion is not None and opinion["ok"] and not opinion["entry_ok"] and (ai_t is None or ai_t["trusted"]):
                     state.record_decision(conn, sym, "skip",
                                           {"why": "llm_veto",
                                            "llm": opinion["summary"][:200]})
-                elif n_open >= PAPER_CFG["max_positions"]:
-                    state.record_decision(conn, sym, "skip", {"why": "max_positions"})
                 else:
                     coll = sizing(total_equity_cash, px, atr)
                     if opinion is not None and opinion["ok"]:
@@ -345,28 +446,32 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                         state.record_decision(conn, sym, "skip",
                                               {"why": "below min notional"})
                     else:
-                        state.open_position(conn, sym, "long", entry_fill(quote), coll,
+                        entry_px = entry_fill(quote)
+                        tp_px = entry_px * (1 + PAPER_CFG["take_profit_atr"] * atr / entry_px) if atr else None
+                        state.open_position(conn, sym, "long", entry_px, coll,
                                             PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
                                             MARGIN_LIQ_OFFSET,
                                             meta={"strategy": "chan10+sma200",
                                                   "llm_bias": (opinion or {}).get("bias"),
                                                   "llm_conf": (opinion or {}).get("confidence"),
-                                                  "atr": atr})
+                                                  "atr": atr,
+                                                  "tp_px": tp_px})
+                        new_this_cycle += 1
                         state.record_decision(conn, sym, "open",
-                                              {"px": px, "collateral": round(coll, 2),
+                                              {"px": entry_px, "collateral": round(coll, 2),
                                                "atr": round(atr, 2), "path": "signal",
+                                               "tp_px": round(tp_px, 6) if tp_px else None,
                                                "llm": (opinion or {}).get("summary", "")[:200]})
-                        opened.append(f"🟢 {sym} open(signal) @{px:.4g} coll {coll:.1f}$")
+                        opened.append(f"🟢 {sym} open(signal) @{entry_px:.4g} coll {coll:.1f}$")
             elif (opinion is not None and opinion["ok"] and opinion["entry_ok"]
                   and opinion["bias"] == "bullish"
+                  and (ai_t is None or ai_t["conviction"])
                   and opinion["confidence"] >= PAPER_CFG["llm_confidence_min"]):
                 # LLM-conviction entry: half cap, one slot, tagged for scoring
                 has_llm = conn.execute(
                     "SELECT COUNT(*) c FROM positions WHERE meta LIKE '%llm_conviction%'"
                 ).fetchone()["c"]
-                if n_open >= PAPER_CFG["max_positions"]:
-                    state.record_decision(conn, sym, "skip", {"why": "max_positions"})
-                elif has_llm:
+                if has_llm:
                     state.record_decision(conn, sym, "skip", {"why": "llm slot busy"})
                 else:
                     coll = sizing(total_equity_cash, px, atr,
@@ -375,17 +480,20 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                         state.record_decision(conn, sym, "skip",
                                               {"why": "below min notional"})
                     else:
-                        state.open_position(conn, sym, "long", entry_fill(quote), coll,
+                        entry_px = entry_fill(quote)
+                        tp_px = entry_px * (1 + PAPER_CFG["take_profit_atr"] * atr / entry_px) if atr else None
+                        state.open_position(conn, sym, "long", entry_px, coll,
                                             PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
                                             MARGIN_LIQ_OFFSET,
                                             meta={"strategy": "llm_conviction",
                                                   "llm_conf": opinion["confidence"],
-                                                  "atr": atr})
+                                                  "atr": atr, "tp_px": tp_px})
+                        new_this_cycle += 1
                         state.record_decision(conn, sym, "open",
-                                              {"px": px, "collateral": round(coll, 2),
-                                               "path": "llm_conviction",
+                                              {"px": entry_px, "collateral": round(coll, 2),
+                                               "path": "llm_conviction", "tp_px": round(tp_px, 6) if tp_px else None,
                                                "llm": opinion["summary"][:200]})
-                        opened.append(f"🤖 {sym} open(LLM) @{px:.4g} coll {coll:.1f}$ "
+                        opened.append(f"🤖 {sym} open(LLM) @{entry_px:.4g} coll {coll:.1f}$ "
                                       f"conf {opinion['confidence']:.0%}")
             elif allow_shorts and short_breakdown and er_now == er_now and er_now >= PAPER_CFG["er_min"]:
                 # deterministic short breakdown; a bullish LLM opinion vetoes
@@ -459,10 +567,10 @@ def run_cycle(notify=None, force: bool = False) -> dict:
     equity = state.snapshot_equity(conn, prices)
     auto_halted = False
     peak = state.peak_equity(conn)
-    if peak > 0 and equity < peak * 0.90:
+    if peak > 0 and equity < peak * (1 - PAPER_CFG["auto_halt_dd_pct"] / 100):
         state.set_setting(conn, "halted", "1")
         auto_halted = True
-        summary_lines_extra = [f"⛔ AUTO-HALT: equity {equity:.2f} is >10% below peak {peak:.2f}"]
+        summary_lines_extra = [f"⛔ AUTO-HALT: equity {equity:.2f} is >{PAPER_CFG['auto_halt_dd_pct']:.0f}% below peak {peak:.2f}"]
         events.record("warn", "risk", summary_lines_extra[0])
     else:
         summary_lines_extra = []
@@ -471,10 +579,11 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                "positions": [r["symbol"] for r in
                              conn.execute("SELECT symbol FROM positions")],
                "lines": opened + closed +
-                        [f"holding: {', '.join(held) or '-'}",
+                        [f"gate-skipped: {', '.join(held_gate) or '-'}" if held_gate else None,
+                         f"holding: {', '.join(held) or '-'}",
                          f"premium_z: {prem_z:+.2f}" if prem_z is not None else "premium_z: n/a",
                          f"equity: {equity:.2f} USDT"]}
-    summary["lines"] = summary["lines"] + summary_lines_extra
+    summary["lines"] = [x for x in summary["lines"] if x] + summary_lines_extra
     summary["auto_halted"] = auto_halted
     events.record("info", "cycle",
                   "چرخه تمام شد — " + " · ".join((opened + closed) or ["بدون معاملهٔ جدید"])
