@@ -47,6 +47,9 @@ VPS 62.60.194.78
   `MARKETMIND_ER_MIN=0.15` · `MARKETMIND_LLM_CONF_MIN=0.55` · `MARKETMIND_CYCLE_MINUTES=15`
   · `MARKETMIND_ALLOW_SHORTS=1` (پوزیشن شورت فعال — سود از ریزش بازار نزولی)
   · `MARKETMIND_MIN_NOTIONAL=25` (حداقل ارزش پوزیشن در حالت دمو؛ پیش‌فرض ۱۰۰ مثل صرافی)
+  · `MARKETMIND_FRACTION_OF_CASH=0.30` (سقف وثیقه هر معامله؛ پیش‌فرض ۰٫۲۰)
+  · `MARKETMIND_VOL_TARGET_RISK=0.05` (ریسک هدف هر معامله؛ پیش‌فرض ۰٫۰۲ — اهرم سایز)
+  · `MARKETMIND_MIN_SIZE_FACTOR=0.6` (کف ضریب کوچک‌سازی AI؛ پیش‌فرض ۰ یعنی نظر AI کامل اعمال شود)
 - دلیل «وارد نشدن» هر کوین در جریان تصمیم‌ها ثبت می‌شود (ER فعلی، حد مجاز،
   موقعیت نسبت به SMA200، وضعیت شکست کانال) و در صفحهٔ 📜 لاگ دیده می‌شود.
 

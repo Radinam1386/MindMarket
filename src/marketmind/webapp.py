@@ -330,7 +330,11 @@ def api_autotrade_status():
                          "last_cycle_ts": last,
                          "er_min": runner.PAPER_CFG["er_min"],
                          "llm_confidence_min": runner.PAPER_CFG["llm_confidence_min"],
-                         "max_positions": runner.PAPER_CFG["max_positions"]})
+                         "max_positions": runner.PAPER_CFG["max_positions"],
+                         "leverage": runner.PAPER_CFG["leverage"],
+                         "fraction_of_cash": runner.PAPER_CFG["fraction_of_cash"],
+                         "vol_target_risk": runner.PAPER_CFG["vol_target_risk"],
+                         "min_size_factor": runner.PAPER_CFG["min_size_factor"]})
 
 
 @app.post("/api/autotrade")

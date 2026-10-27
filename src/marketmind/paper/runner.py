@@ -67,6 +67,12 @@ PAPER_CFG["max_positions"] = int(_env_float("MARKETMIND_MAX_POSITIONS",
 PAPER_CFG["cycle_interval_min"] = max(1.0, _env_float("MARKETMIND_CYCLE_MINUTES", 15.0))
 PAPER_CFG["allow_shorts"] = os.environ.get("MARKETMIND_ALLOW_SHORTS", "0") == "1"
 PAPER_CFG["min_notional"] = _env_float("MARKETMIND_MIN_NOTIONAL", PAPER_CFG["min_notional"])
+PAPER_CFG["fraction_of_cash"] = _env_float("MARKETMIND_FRACTION_OF_CASH",
+                                           PAPER_CFG["fraction_of_cash"])
+PAPER_CFG["vol_target_risk"] = _env_float("MARKETMIND_VOL_TARGET_RISK",
+                                          PAPER_CFG["vol_target_risk"])
+PAPER_CFG["leverage"] = _env_float("MARKETMIND_LEVERAGE", PAPER_CFG["leverage"])
+PAPER_CFG["min_size_factor"] = _env_float("MARKETMIND_MIN_SIZE_FACTOR", 0.0)
 
 
 SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
@@ -290,7 +296,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 else:
                     coll = sizing(total_equity_cash, px, atr)
                     if opinion is not None and opinion["ok"]:
-                        coll = coll * min(1.0, opinion["size_factor"])
+                        coll = coll * max(PAPER_CFG["min_size_factor"],
+                                          min(1.0, opinion["size_factor"]))
                     if coll <= 0:
                         state.record_decision(conn, sym, "skip",
                                               {"why": "below min notional"})
@@ -348,7 +355,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 else:
                     coll = sizing(total_equity_cash, px, atr)
                     if opinion is not None and opinion["ok"]:
-                        coll = coll * min(1.0, opinion["size_factor"])
+                        coll = coll * max(PAPER_CFG["min_size_factor"],
+                                          min(1.0, opinion["size_factor"]))
                     if coll <= 0:
                         state.record_decision(conn, sym, "skip",
                                               {"why": "below min notional"})
