@@ -178,6 +178,12 @@ def open_position(conn: sqlite3.Connection, symbol: str, side: str, price: float
     return int(cur.lastrowid)
 
 
+def update_position_meta(conn: sqlite3.Connection, pos_id: int, meta: dict) -> None:
+    conn.execute("UPDATE positions SET meta=? WHERE id=?",
+                 (json.dumps(meta, ensure_ascii=False), pos_id))
+    conn.commit()
+
+
 def position_fees_and_settlement(pos: sqlite3.Row, exit_px: float, exit_ts: int,
                                  close_reason: str) -> tuple[float, float, float]:
     """Returns (interest, total_fees, settlement_cash) with the measured fee model."""

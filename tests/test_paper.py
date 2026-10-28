@@ -92,3 +92,18 @@ def test_short_open_close_accounting(tmp_path, monkeypatch):
     res = state.close_position(conn, pid, 72000.0, "signal")
     assert res["return_pct"] > 0
     assert state.account_cash(conn) == pytest.approx(160.0 + res["settlement"])
+
+
+def test_update_position_meta(tmp_path, monkeypatch):
+    """The runner stores best_px in position meta for the breakeven trail."""
+    monkeypatch.setattr(state, "DB_PATH", tmp_path / "paper.sqlite")
+    state.init_account(cash=200.0)
+    conn = state.connect()
+    pid = state.open_position(conn, "BTCUSDT", "short", price=80000.0, collateral=40.0,
+                              leverage=3.0, liq_frac=0.8546, liq_offset=0.0045)
+    state.update_position_meta(conn, pid, {"strategy": "donchian_short", "atr": 640.0,
+                                           "best_px": 79000.0})
+    row = conn.execute("SELECT meta FROM positions WHERE id=?", (pid,)).fetchone()
+    meta = json.loads(row["meta"])
+    assert meta["best_px"] == 79000.0
+    assert meta["strategy"] == "donchian_short"

@@ -12,6 +12,7 @@ Decision policy (LLM advises inside a hard envelope):
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 import traceback
@@ -73,6 +74,8 @@ PAPER_CFG["vol_target_risk"] = _env_float("MARKETMIND_VOL_TARGET_RISK",
                                           PAPER_CFG["vol_target_risk"])
 PAPER_CFG["leverage"] = _env_float("MARKETMIND_LEVERAGE", PAPER_CFG["leverage"])
 PAPER_CFG["min_size_factor"] = _env_float("MARKETMIND_MIN_SIZE_FACTOR", 0.0)
+PAPER_CFG["stop_atr"] = _env_float("MARKETMIND_STOP_ATR", 2.0)
+PAPER_CFG["trail_trigger_atr"] = _env_float("MARKETMIND_TRAIL_TRIGGER_ATR", 1.0)
 
 
 SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
@@ -258,6 +261,46 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 state.record_decision(conn, sym, "liquidate",
                                       {"px": px, **{k: round(v, 4) for k, v in res.items()}})
                 closed.append(f"⛔ {sym} LIQUIDATED {res['return_pct']:+.1f}%")
+                pos = None
+
+        # 1.5) risk exits: ATR stop-loss + breakeven trail (deterministic, always)
+        if pos is not None and PAPER_CFG.get("stop_atr", 0) > 0:
+            try:
+                m = json.loads(pos["meta"] or "{}")
+            except Exception:
+                m = {}
+            entry_px = float(pos["entry_px"])
+            atr_entry = float(m.get("atr") or atr) or atr
+            stop_k = float(PAPER_CFG["stop_atr"])
+            trail_t = float(PAPER_CFG["trail_trigger_atr"])
+            best = float(m.get("best_px") or entry_px)
+            if pos["side"] == "long":
+                best = max(best, px)
+                stop_px = entry_px - stop_k * atr_entry
+                if best - entry_px >= trail_t * atr_entry:
+                    stop_px = max(stop_px, entry_px)  # lock breakeven
+                hit = quote["bid"] <= stop_px
+            else:
+                best = min(best, px)
+                stop_px = entry_px + stop_k * atr_entry
+                if entry_px - best >= trail_t * atr_entry:
+                    stop_px = min(stop_px, entry_px)  # lock breakeven
+                hit = quote["ask"] >= stop_px
+            if m.get("best_px") != best:
+                m["best_px"] = best
+                state.update_position_meta(conn, pos["id"], m)
+            if hit:
+                locked = ((pos["side"] == "long" and stop_px >= entry_px) or
+                          (pos["side"] == "short" and stop_px <= entry_px))
+                reason = "breakeven_trail" if locked else "stop_loss"
+                res = state.close_position(conn, pos["id"],
+                                           exit_fill(quote) if pos["side"] == "long"
+                                           else entry_fill(quote), reason)
+                state.record_decision(conn, sym, "close",
+                                      {"px": px, "signal": reason,
+                                       "stop_px": round(stop_px, 6),
+                                       **{k: round(v, 4) for k, v in res.items()}})
+                closed.append(f"🛑 {sym} closed ({reason}) {res['return_pct']:+.1f}%")
                 pos = None
 
         # 2) exits (deterministic; LLM cannot block)
