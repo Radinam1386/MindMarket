@@ -1,0 +1,19 @@
+services:
+  marketmind:
+    build:
+      context: /srv/marketmind
+      dockerfile: deploy/Dockerfile
+    container_name: marketmind
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      MARKETMIND_SCHEDULER: "1"
+      MARKETMIND_ROOT: /app
+    volumes:
+      - /srv/marketmind/data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8787/healthz', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
