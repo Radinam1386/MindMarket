@@ -334,6 +334,10 @@ def api_autotrade_status():
                          "leverage": runner.PAPER_CFG["leverage"],
                          "fraction_of_cash": runner.PAPER_CFG["fraction_of_cash"],
                          "vol_target_risk": runner.PAPER_CFG["vol_target_risk"],
+                         "min_size_factor": runner.PAPER_CFG["min_size_factor"],
+                         "signal_mode": runner.PAPER_CFG.get("signal_mode", "closed"),
+                         "max_same_side": runner.PAPER_CFG.get("max_same_side", 3),
+                         "btc_filter_shorts": runner.PAPER_CFG.get("btc_filter_shorts", False),
                          "min_size_factor": runner.PAPER_CFG["min_size_factor"]})
 
 

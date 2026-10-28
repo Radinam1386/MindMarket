@@ -87,6 +87,9 @@ PAPER_CFG["leverage"] = _env_float("MARKETMIND_LEVERAGE", PAPER_CFG["leverage"])
 PAPER_CFG["min_size_factor"] = _env_float("MARKETMIND_MIN_SIZE_FACTOR", 0.0)
 PAPER_CFG["stop_atr"] = _env_float("MARKETMIND_STOP_ATR", 2.0)
 PAPER_CFG["trail_trigger_atr"] = _env_float("MARKETMIND_TRAIL_TRIGGER_ATR", 1.0)
+PAPER_CFG["signal_mode"] = os.environ.get("MARKETMIND_SIGNAL_MODE", "closed")
+PAPER_CFG["max_same_side"] = int(_env_float("MARKETMIND_MAX_SAME_SIDE", 3.0))
+PAPER_CFG["btc_filter_shorts"] = os.environ.get("MARKETMIND_BTC_FILTER_SHORTS", "0") == "1"
 
 
 SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
@@ -245,6 +248,17 @@ def run_cycle(notify=None, force: bool = False) -> dict:
     prem_df = ingest.load_candles("USDTTMN", "1D")
     prem_z = analyst.premium_z_now(prem_df) if prem_df is not None else None
     prices, opened, closed, held, held_gate = {}, [], [], [], []
+
+    # BTC market-leader regime on the decision bar — gates counter-trend shorts.
+    btc_bull = None
+    btc_df = frames.get("BTCUSDT")
+    if btc_df is not None and len(btc_df) >= PAPER_CFG["sma_n"] + 5:
+        _bi = -1 if PAPER_CFG.get("signal_mode", "closed") == "live" else -2
+        btc_close = float(btc_df["close"].iloc[_bi])
+        btc_sma = float(btc_df["close"].rolling(PAPER_CFG["sma_n"]).mean().shift(1).iloc[_bi])
+        if btc_sma == btc_sma:
+            btc_bull = bool(btc_close > btc_sma)
+    btc_regime_fa = "نامشخص" if btc_bull is None else ("گاوی" if btc_bull else "نزولی")
     new_this_cycle = 0
     ai_t = None  # analyst trust computed per-symbol below
 
@@ -256,13 +270,18 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         sig = donchian_er(df, entry_n=PAPER_CFG["entry_n"], exit_n=PAPER_CFG["exit_n"],
                           er_n=PAPER_CFG["er_n"], er_min=PAPER_CFG["er_min"],
                           sma_n=PAPER_CFG["sma_n"])
-        close_daily = float(df["close"].iloc[-1])
-        er_now = efficiency_ratio(df["close"], PAPER_CFG["er_n"]).iloc[-1]
-        sma200_now = float(df["close"].rolling(PAPER_CFG["sma_n"]).mean().shift(1).iloc[-1])
-        upper_prev = float(df["high"].rolling(PAPER_CFG["entry_n"]).max().shift(1).iloc[-1])
-        lower_prev = float(df["low"].rolling(PAPER_CFG["exit_n"]).min().shift(1).iloc[-1])
-        short_exit_px = float(df["high"].rolling(PAPER_CFG["exit_n"]).max().shift(1).iloc[-1])
-        gate_detail = {"er": (round(float(er_now), 3) if er_now == er_now else None),
+        # Decision bar: "closed" (default) evaluates the last COMPLETED daily bar —
+        # identical to the backtest engine and golden rule #4 ("signals decide on
+        # bar close; execution at the next open"). "live" evaluates the forming bar.
+        sig_i = -1 if PAPER_CFG.get("signal_mode", "closed") == "live" else -2
+        close_daily = float(df["close"].iloc[sig_i])
+        er_now = efficiency_ratio(df["close"], PAPER_CFG["er_n"]).iloc[sig_i]
+        sma200_now = float(df["close"].rolling(PAPER_CFG["sma_n"]).mean().shift(1).iloc[sig_i])
+        upper_prev = float(df["high"].rolling(PAPER_CFG["entry_n"]).max().shift(1).iloc[sig_i])
+        lower_prev = float(df["low"].rolling(PAPER_CFG["exit_n"]).min().shift(1).iloc[sig_i])
+        short_exit_px = float(df["high"].rolling(PAPER_CFG["exit_n"]).max().shift(1).iloc[sig_i])
+        gate_detail = {"mode": PAPER_CFG.get("signal_mode", "closed"),
+                       "er": (round(float(er_now), 3) if er_now == er_now else None),
                        "er_min": PAPER_CFG["er_min"],
                        "above_sma200": bool(close_daily > sma200_now),
                        "breakout": bool(close_daily > upper_prev),
@@ -275,8 +294,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             continue
         px = quote["mid"]
         prices[sym] = px
-        entry_sig = bool(sig["long_entry"].iloc[-1])
-        exit_sig = bool(sig["long_exit"].iloc[-1])
+        entry_sig = bool(sig["long_entry"].iloc[sig_i])
+        exit_sig = bool(sig["long_exit"].iloc[sig_i])
 
         pos = conn.execute("SELECT * FROM positions WHERE symbol=?", (sym,)).fetchone()
 
@@ -307,7 +326,11 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                    "confidence": r["confidence"],
                                    "outcome_pct": round((now_px / then_px - 1) * 100, 1)})
                 opinion = analyst.analyze(sym, df, prem_z, dict(pos) if pos else None,
-                                          {"entry_sig": entry_sig, "exit_sig": exit_sig},
+                                          {"entry_sig": entry_sig, "exit_sig": exit_sig,
+                                           "portfolio": {"n_open": int(conn.execute(
+                                               "SELECT COUNT(*) c FROM positions").fetchone()["c"]),
+                                               "total_coll": round(_deployed_collateral(conn), 2),
+                                               "btc_regime": btc_regime_fa}},
                                           memory=memory)
                 state.save_analyst(conn, sym, opinion)
                 if not opinion.get("ok"):
@@ -405,6 +428,10 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             total_equity_cash = cash + _deployed_collateral(conn)
             allow_shorts = PAPER_CFG.get("allow_shorts", False)
             short_breakdown = bool(close_daily < lower_prev)
+            n_shorts = conn.execute(
+                "SELECT COUNT(*) c FROM positions WHERE side='short'").fetchone()["c"]
+            btc_ok_for_short = (not PAPER_CFG.get("btc_filter_shorts", False)) or \
+                sym == "BTCUSDT" or btc_bull is not True
 
             # v2.2 quality gates (shared by both entry paths)
             gate = None
@@ -496,13 +523,19 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                         opened.append(f"🤖 {sym} open(LLM) @{entry_px:.4g} coll {coll:.1f}$ "
                                       f"conf {opinion['confidence']:.0%}")
             elif allow_shorts and short_breakdown and er_now == er_now and er_now >= PAPER_CFG["er_min"]:
-                # deterministic short breakdown; a bullish LLM opinion vetoes
-                if opinion is not None and opinion["ok"] and opinion["bias"] == "bullish":
+                # deterministic short breakdown; bullish LLM opinion or a bullish
+                # BTC market regime vetoes (no counter-trend shorts)
+                if not btc_ok_for_short:
+                    state.record_decision(conn, sym, "skip",
+                                          {"why": "btc_bullish_regime"})
+                elif opinion is not None and opinion["ok"] and opinion["bias"] == "bullish":
                     state.record_decision(conn, sym, "skip",
                                           {"why": "llm_veto_short",
                                            "llm": opinion["summary"][:200]})
                 elif n_open >= PAPER_CFG["max_positions"]:
                     state.record_decision(conn, sym, "skip", {"why": "max_positions"})
+                elif n_shorts >= PAPER_CFG.get("max_same_side", 3):
+                    state.record_decision(conn, sym, "skip", {"why": "max_shorts"})
                 else:
                     coll = sizing(total_equity_cash, px, atr)
                     if opinion is not None and opinion["ok"]:
@@ -530,10 +563,15 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 has_llm = conn.execute(
                     "SELECT COUNT(*) c FROM positions WHERE meta LIKE '%llm_conviction%'"
                 ).fetchone()["c"]
-                if n_open >= PAPER_CFG["max_positions"]:
+                if not btc_ok_for_short:
+                    state.record_decision(conn, sym, "skip",
+                                          {"why": "btc_bullish_regime"})
+                elif n_open >= PAPER_CFG["max_positions"]:
                     state.record_decision(conn, sym, "skip", {"why": "max_positions"})
                 elif has_llm:
                     state.record_decision(conn, sym, "skip", {"why": "llm slot busy"})
+                elif n_shorts >= PAPER_CFG.get("max_same_side", 3):
+                    state.record_decision(conn, sym, "skip", {"why": "max_shorts"})
                 else:
                     coll = sizing(total_equity_cash, px, atr,
                                   cap_frac=PAPER_CFG["llm_fraction_cap"])

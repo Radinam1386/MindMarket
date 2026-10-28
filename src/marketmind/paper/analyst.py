@@ -52,8 +52,14 @@ def build_context(symbol: str, df: pd.DataFrame, prem_z: float | None,
                                     tail["low"], tail["close"], tail["volume"])
     )
     pos_txt = "بدون موقعیت باز" if position is None else (
-        f"موقعیت LONG باز: ورود {position['entry_px']:.6g}، وثیقه {position['collateral']:.1f}$، "
-        f"لیکویید {position['liq_px']:.6g}")
+        f"موقعیت {str(position.get('side', 'long')).upper()} باز: ورود {position['entry_px']:.6g}، "
+        f"وثیقه {position['collateral']:.1f}$، لیکویید {position['liq_px']:.6g}")
+    port = cfg.get("portfolio") or {}
+    port_line = ""
+    if port:
+        port_line = (f"- وضعیت کل پرتفوی: {port.get('n_open', 0)} پوزیشن باز، "
+                     f"مجموع وثیقهٔ درگیر {port.get('total_coll', 0)}$، "
+                     f"رژیم بازار (BTC): {port.get('btc_regime', 'نامشخص')}\n")
     prem_line = "" if prem_z is None else f"- {PREMIUM_HELP}\n  مقدار فعلی: {prem_z:+.2f}"
     if memory:
         lines = ["سابقهٔ نظرهای قبلی خودت و آنچه بعدش شد (بازده قیمت از آن روز تا امروز):"]
@@ -79,7 +85,7 @@ def build_context(symbol: str, df: pd.DataFrame, prem_z: float | None,
 {prem_line}
 {mem_block}
 وضعیت حساب ما: {pos_txt}
-سیگنال قطعی سیستم (کانال دونچین 20 + فیلترها): ورود={'بله' if cfg['entry_sig'] else 'خیر'}، خروج={'بله' if cfg['exit_sig'] else 'خیر'}
+{port_line}سیگنال قطعی سیستم (کانال دونچین 20 + فیلترها): ورود={'بله' if cfg['entry_sig'] else 'خیر'}، خروج={'بله' if cfg['exit_sig'] else 'خیر'}
 محدودیت‌های سخت: حداکثر اهرم 3، حداکثر ریسک هر معامله 2% سرمایه، سقف ارزش موقعیت 1700$.
 JSON تحلیلی‌ات را بده."""
 
