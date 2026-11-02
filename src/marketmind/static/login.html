@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ورود به مایندمارکت</title>
+    <link rel="stylesheet" href="/static/site.css" />
+  </head>
+  <body class="login-page">
+    <main class="login-shell">
+      <section class="login-form-side">
+        <a class="logo" href="/"
+          ><span class="logo-mark"
+            ><svg viewBox="0 0 32 32" aria-hidden="true">
+              <path d="M3 23V9l7 8 6-10 6 10 7-8v14" /></svg></span
+          ><span>mind<span>market</span></span></a
+        >
+        <div class="login-content">
+          <a class="back-link" href="/">→ بازگشت به صفحه اصلی</a>
+          <h1>خوش آمدی.</h1>
+          <p>برای ادامه وارد فضای شخصی خودت شو.</p>
+          <form id="login-form">
+            <label for="username">نام کاربری</label
+            ><input
+              id="username"
+              name="username"
+              autocomplete="username"
+              required
+              autofocus
+            /><label for="password">رمز عبور</label
+            ><input
+              id="password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required
+            />
+            <p class="form-error" id="error" role="alert"></p>
+            <button class="button dark" type="submit">
+              ورود به حساب <span>↖</span>
+            </button>
+          </form>
+          <p class="login-note">
+            این فضا برای پژوهش و معاملهٔ آزمایشی طراحی شده است.
+          </p>
+        </div>
+        <span class="login-bottom">MINDMARKET / PAPER TRADING</span>
+      </section>
+      <aside class="login-aside">
+        <span>یک دفتر روشن برای بازارهای پیچیده.</span>
+        <div>
+          <p>داده.<br />تصمیم.<br /><em>تجربه.</em></p>
+          <small>معاملهٔ آزمایشی با مسیر تصمیم‌گیری قابل بررسی.</small>
+        </div>
+        <span>RESEARCH FIRST. ALWAYS.</span>
+      </aside>
+    </main>
+    <script src="/static/login.js" defer></script>
+  </body>
+</html>

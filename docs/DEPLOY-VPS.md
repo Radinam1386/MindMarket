@@ -12,18 +12,27 @@ VPS 62.60.194.78
      ├─ deploy/vps-deploy.sh   اسکریپت pull-deploy (fetch → build → up → healthcheck)
      ├─ deploy/systemd/        یونیت‌های تایمر CD (هر ۵ دقیقه)
      └─ data/                  دادهٔ ماندگار ( volume ./data:/app/data )
-         ├─ paper.sqlite       حساب ۲۰۰ USDT و موقعیت‌ها و تصمیم‌ها
+         ├─ paper.sqlite       حساب اصلی، موقعیت‌ها و تصمیم‌ها
+         ├─ accounts/          دفتر مستقل حساب‌های دیگر
          ├─ candles/           کندل‌ها (بوت اول از seed پر می‌شود، بعد از API تازه می‌شود)
-         └─ secrets/           dashboard_login.json · llm_api.json · telegram.json (اختیاری)
+         └─ secrets/           dashboard_users.json · dashboard_session.key · llm_api.json · telegram.json (اختیاری)
 ```
 
-- **داشبورد:** `http://62.60.194.78:8787` — ورود با **یوزر/پس** (پنجرهٔ استاندارد Basic Auth مرورگر).
-  اعتبارنامه‌ها در `data/secrets/dashboard_login.json`:
-  `{"username": "...", "password": "..."}` — تغییرشان بدهید و `docker compose restart` بزنید.
-- بدون اعتبارنامه: درخواست ریموت ۴۰۱ می‌گیرد؛ اگر فایل ورود اصلاً نباشد ۴۰۳.
-  فقط `127.0.0.1` (روی خود سرور) و `/healthz` بدون ورود بازند.
-- توکن در URL دیگر وجود ندارد (حذف شد)؛ `dashboard_token.txt` قدیمی نادیده گرفته می‌شود.
-- چرخهٔ روزانهٔ paper داخل کانتینر اجرا می‌شود (`MARKETMIND_SCHEDULER=1`)، هر روز ۰۱:۰۰ UTC = ۰۴:۳۰ تهران.
+- **داشبورد:** `http://62.60.194.78:8787` — صفحهٔ اصلی عمومی است؛ هر حساب از `/login` وارد فضای مستقل خود می‌شود.
+- گذرواژه‌ها به‌صورت هش در `data/secrets/dashboard_users.json` ذخیره می‌شوند. حساب اصلی همچنان از `paper.sqlite` استفاده می‌کند؛ برای هر حساب دیگر یک فایل مستقل در `data/accounts/` وجود دارد.
+- در نخستین اجرای نسخهٔ جدید، حساب قدیمی از `dashboard_login.json` یا متغیرهای `DASHBOARD_USER` و `DASHBOARD_PASSWORD` وارد می‌شود، بدون تغییر دفتر معاملات. پس از بررسی ورود، فایل قدیمی حاوی گذرواژهٔ متنی را حذف کنید.
+- هر حساب چرخه و تنظیمات جدا دارد. `MARKETMIND_SCHEDULER=1` برای اجرای خودکار حساب‌ها لازم است؛ فعال بودن چرخه به‌تنهایی کافی نیست.
+- نشانی فعلی HTTP است. برای محافظت از اعتبارنامه‌ها در شبکه، HTTPS را با نام دامنه و پروکسی معکوس فراهم کنید.
+
+### مدیریت حساب‌ها
+
+```bash
+# دستورها رمز را به‌صورت تعاملی دریافت می‌کنند؛ رمز را در آرگومان ننویسید.
+docker compose exec marketmind python -m marketmind.accounts set-owner USERNAME
+docker compose exec marketmind python -m marketmind.accounts set-user USERNAME --initial-cash 200 --auto-trade
+```
+
+تکرار دستور برای یک کاربر رمز او را عوض می‌کند و موجودی و تاریخچه را بازنشانی نمی‌کند. `--auto-trade` فقط هنگام ساخت حساب جدید اعمال می‌شود؛ بعداً آن را از داشبورد کنترل کنید.
 
 ## جریان انتشار (CI/CD)
 
@@ -85,11 +94,11 @@ docker compose restart                  # ری‌استارت ساده
 ## اسرار
 
 هیچ کلیدی در گیت/ایمیج نیست. روی سرور در `/opt/marketmind/data/secrets/`:
-- `dashboard_login.json` — یوزر/پس داشبورد (ورود مرورگر)
+- `dashboard_users.json` و `dashboard_session.key` — هش اعتبارنامه‌ها و کلید نشست
 - `llm_api.json` — کانفیگ LLM (کپی از لوکال؛ بدون آن پنل AI «تحلیل ناموفق» می‌دهد ولی سیستم بالا می‌ماند)
 - `telegram.json` — اختیاری (بلاک بودن تلگرام از ایران را ببینید)
 
-اعتبارنامهٔ داشبورد و LLM/تلگرام از env هم خوانده می‌شوند (`DASHBOARD_USER`,
+اعتبارنامهٔ قدیمی داشبورد برای مهاجرت اولیه و LLM/تلگرام از env هم خوانده می‌شوند (`DASHBOARD_USER`,
 `DASHBOARD_PASSWORD`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) — فایل در `/opt/marketmind/.env`
 (کامیت نمی‌شود) و compose آن را به کانتینر می‌دهد.
@@ -98,8 +107,8 @@ docker compose restart                  # ری‌استارت ساده
 
 | نشانه | علت احتمالی | راه‌حل |
 |---|---|---|
-| پنجرهٔ ورود باز می‌شود و رد می‌شوید | یوزر/پس غلط | محتوای `data/secrets/dashboard_login.json`؛ مرورگر را ببندید و باز کنید (کش اعتبارنامه) |
-| 403 ریموت با پیام «login not configured» | `dashboard_login.json` نیست | فایل را در `data/secrets/` بسازید و `docker compose restart` |
+| ورود رد می‌شود | یوزر/پس غلط | با دستور مدیریت حساب، رمز را دوباره تنظیم کنید |
+| حسابی برای ورود وجود ندارد | فایل کاربران ایجاد نشده | با دستور `set-owner` حساب اصلی را بسازید |
 | build خطای pull از docker.io | آینه‌ها موقتاً خراب | `daemon.json` را عوض کنید یا بعداً تایمر خودش دوباره امتحان می‌کند |
 | AI همیشه «تحلیل ناموفق» | `llm_api.json` نیست یا LLM در دسترس نیست | فایل را در `data/secrets/` بگذارید و ری‌استارت |
 | چرخهٔ روزانه اجرا نمی‌شود | `MARKETMIND_SCHEDULER` حذف شده | در compose.yml باید `1` باشد؛ لاگ را ببینید |

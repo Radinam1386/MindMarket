@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from ..config import (
 )
 
 DB_PATH = DATA_DIR / "paper.sqlite"
+_ACCOUNT = ContextVar("paper_account", default="owner")
 RENEWAL_SECONDS = MARGIN_RENEWAL_INTERVAL_HOURS * 3600
 
 SCHEMA = """
@@ -135,9 +138,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def current_account() -> str:
+    return _ACCOUNT.get()
+
+
+@contextmanager
+def use_account(account_id: str):
+    """Scope all ledger operations in this task/thread to one isolated account."""
+    if account_id != "owner" and (len(account_id) != 32 or
+                                   any(c not in "0123456789abcdef" for c in account_id)):
+        raise ValueError("invalid account id")
+    token = _ACCOUNT.set(account_id)
+    try:
+        yield
+    finally:
+        _ACCOUNT.reset(token)
+
+
 def connect() -> sqlite3.Connection:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    account = current_account()
+    path = DB_PATH if account == "owner" else DATA_DIR / "accounts" / f"{account}.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     _migrate(conn)
@@ -149,6 +171,8 @@ def init_account(cash: float = 200.0) -> None:
     if conn.execute("SELECT 1 FROM account").fetchone() is None:
         conn.execute("INSERT INTO account (id, cash, created_at) VALUES (1, ?, ?)",
                      (cash, int(time.time())))
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('initial_cash', ?)",
+                     (str(cash),))
         conn.commit()
     conn.close()
 

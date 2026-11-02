@@ -2,7 +2,10 @@
 .git/
 data/
 logs/
-docs/
+docs/*
+!docs/reports/
+docs/reports/*
+!docs/reports/research-log.md
 tests/
 __pycache__/
 *.pyc

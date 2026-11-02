@@ -66,6 +66,17 @@ Data lives in `data/` (gitignored). Reports in `docs/reports/`.
 - [ ] Judgment: ≥8 weeks forward paper results → evidence dossier → owner approval gates
       (rules-vs-AI per-path stats tracked on the dashboard)
 
+## Dashboard accounts
+
+The landing page is public; the dashboard requires a username and password. Existing
+single-user credentials migrate once to `data/secrets/dashboard_users.json` without
+resetting the original `paper.sqlite`. Each additional user gets an isolated paper
+ledger under `data/accounts/`. To create or update users, run the interactive
+`python -m marketmind.accounts set-owner USERNAME` or
+`python -m marketmind.accounts set-user USERNAME --initial-cash 200 --auto-trade`.
+Passwords are prompted for and stored as salted hashes. Automated cycles for all
+accounts require `MARKETMIND_SCHEDULER=1` on the server.
+
 ## Project layout
 
 ```

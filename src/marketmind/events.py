@@ -20,7 +20,9 @@ _FILE = LOGS_DIR / "events.log"
 def record(level: str, source: str, message: str, detail: str = "") -> None:
     """level: info | warn | error. Never raises."""
     try:
-        entry = {"ts": int(time.time()), "level": level, "source": source,
+        from .paper.state import current_account
+
+        entry = {"account": current_account(), "ts": int(time.time()), "level": level, "source": source,
                  "message": (message or "")[:500], "detail": (detail or "")[:1500]}
         with _LOCK:
             _RING.append(entry)
@@ -40,4 +42,6 @@ def recent(limit: int = 100) -> list[dict]:
     """Newest first."""
     with _LOCK:
         items = list(_RING)
-    return items[::-1][: max(1, limit)]
+    from .paper.state import current_account
+
+    return [item for item in reversed(items) if item.get("account", "owner") == current_account()][:max(1, limit)]

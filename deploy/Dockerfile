@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir -r /app/deploy/requirements.txt \
 COPY src /app/src
 COPY pyproject.toml README.md /app/
 COPY deploy/seed /app/deploy/seed
+COPY docs/reports/research-log.md /app/docs/reports/research-log.md
 RUN pip install --no-cache-dir --no-deps --no-build-isolation .
 
 RUN mkdir -p /app/data/secrets
