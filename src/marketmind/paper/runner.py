@@ -28,7 +28,7 @@ from ..config import (
 )
 from ..data import ingest
 from ..wallex.client import WallexPublicClient
-from . import analyst, state
+from . import agent_team, analyst, state
 
 ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
           "ADAUSDT", "LINKUSDT", "DOTUSDT", "DOGEUSDT"]
@@ -77,7 +77,7 @@ PAPER_CFG["llm_confidence_min"] = _env_float("MARKETMIND_LLM_CONF_MIN",
 PAPER_CFG["max_positions"] = int(_env_float("MARKETMIND_MAX_POSITIONS",
                                             PAPER_CFG["max_positions"]))
 PAPER_CFG["cycle_interval_min"] = max(1.0, _env_float("MARKETMIND_CYCLE_MINUTES", 15.0))
-PAPER_CFG["allow_shorts"] = os.environ.get("MARKETMIND_ALLOW_SHORTS", "0") == "1"
+PAPER_CFG["allow_shorts"] = os.environ.get("MARKETMIND_ALLOW_SHORTS", "1") == "1"
 PAPER_CFG["min_notional"] = _env_float("MARKETMIND_MIN_NOTIONAL", PAPER_CFG["min_notional"])
 PAPER_CFG["fraction_of_cash"] = _env_float("MARKETMIND_FRACTION_OF_CASH",
                                            PAPER_CFG["fraction_of_cash"])
@@ -90,6 +90,7 @@ PAPER_CFG["trail_trigger_atr"] = _env_float("MARKETMIND_TRAIL_TRIGGER_ATR", 1.0)
 PAPER_CFG["signal_mode"] = os.environ.get("MARKETMIND_SIGNAL_MODE", "closed")
 PAPER_CFG["max_same_side"] = int(_env_float("MARKETMIND_MAX_SAME_SIDE", 3.0))
 PAPER_CFG["btc_filter_shorts"] = os.environ.get("MARKETMIND_BTC_FILTER_SHORTS", "0") == "1"
+PAPER_CFG["team_gate"] = os.environ.get("MARKETMIND_TEAM_GATE", "1") == "1"
 
 
 SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
@@ -165,7 +166,9 @@ def spread_pct(q: dict) -> float:
 
 def recent_entries(conn, days: int = 7) -> int:
     since = int(time.time()) - days * 86400
-    row = conn.execute("SELECT COUNT(*) c FROM trades WHERE entry_ts >= ?", (since,)).fetchone()
+    row = conn.execute("SELECT (SELECT COUNT(*) FROM trades WHERE entry_ts >= ?) + "
+                       "(SELECT COUNT(*) FROM positions WHERE entry_ts >= ?) c",
+                       (since, since)).fetchone()
     return int(row["c"])
 
 
@@ -229,8 +232,9 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         if last and (int(time.time()) - last) < 20 * 3600:
             events.record("info", "cycle",
                           "چرخهٔ امروز قبلاً اجرا شده (برای اجرای مجدد force لازم است)")
+            cash = state.account_cash(conn)
             conn.close()
-            return {"ts": int(time.time()), "equity": state.account_cash(conn),
+            return {"ts": int(time.time()), "equity": cash,
                     "open": 0, "closed": 0, "positions": [],
                     "lines": ["⏭ today's cycle already ran (use force to override)"]}
 
@@ -241,8 +245,9 @@ def run_cycle(notify=None, force: bool = False) -> dict:
     except Exception as e:
         events.record("error", "cycle", f"خطا در به‌روزرسانی کندل‌ها: {e}",
                       traceback.format_exc()[-1200:])
+        cash = state.account_cash(conn)
         conn.close()
-        return {"ts": int(time.time()), "equity": state.account_cash(conn),
+        return {"ts": int(time.time()), "equity": cash, "failed": True,
                 "open": 0, "closed": 0, "positions": [],
                 "lines": [f"❌ candle refresh failed: {e}"]}
     prem_df = ingest.load_candles("USDTTMN", "1D")
@@ -262,8 +267,15 @@ def run_cycle(notify=None, force: bool = False) -> dict:
     new_this_cycle = 0
     ai_t = None  # analyst trust computed per-symbol below
 
-    for sym in ASSETS:
-        df = frames[sym]
+    # Check existing positions before spending time on new-entry analysis.
+    positioned = {r["symbol"] for r in conn.execute("SELECT symbol FROM positions")}
+    ordered_assets = ([sym for sym in ASSETS if sym in positioned] +
+                      [sym for sym in ASSETS if sym not in positioned])
+    for sym in ordered_assets:
+        df = frames.get(sym)
+        if df is None or df.empty:
+            state.record_decision(conn, sym, "skip", {"why": "missing candles"})
+            continue
         if len(df) < PAPER_CFG["sma_n"] + 5:
             state.record_decision(conn, sym, "skip", {"why": "insufficient history"})
             continue
@@ -293,6 +305,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             state.record_decision(conn, sym, "skip", {"why": f"quote error: {e}"})
             continue
         px = quote["mid"]
+        atr = atr_of(df)
         prices[sym] = px
         entry_sig = bool(sig["long_entry"].iloc[sig_i])
         exit_sig = bool(sig["long_exit"].iloc[sig_i])
@@ -301,7 +314,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
 
         # 0) LLM analyst opinion (cached per day; memory of its past calls)
         opinion = None
-        if PAPER_CFG["use_llm"]:
+        if PAPER_CFG["use_llm"] and pos is None:
             if state.analyst_today(conn, sym):
                 rows = state.recent_analyst(conn, sym, 1)
                 if rows:
@@ -342,9 +355,11 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         if pos is not None:
             if (pos["side"] == "long" and quote["bid"] <= pos["liq_px"]) or \
                (pos["side"] == "short" and quote["ask"] >= pos["liq_px"]):
-                res = state.close_position(conn, pos["id"], exit_fill(quote), "liquidated")
+                res = state.close_position(conn, pos["id"],
+                                           exit_fill(quote) if pos["side"] == "long"
+                                           else entry_fill(quote), "liquidated")
                 state.record_decision(conn, sym, "liquidate",
-                                      {"px": px, **{k: round(v, 4) for k, v in res.items()}})
+                                      {"px": px, **{k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in res.items()}})
                 closed.append(f"⛔ {sym} LIQUIDATED {res['return_pct']:+.1f}%")
                 pos = None
 
@@ -384,7 +399,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 state.record_decision(conn, sym, "close",
                                       {"px": px, "signal": reason,
                                        "stop_px": round(stop_px, 6),
-                                       **{k: round(v, 4) for k, v in res.items()}})
+                                       **{k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in res.items()}})
                 closed.append(f"🛑 {sym} closed ({reason}) {res['return_pct']:+.1f}%")
                 pos = None
 
@@ -393,14 +408,14 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             res = state.close_position(conn, pos["id"], exit_fill(quote), "signal")
             state.record_decision(conn, sym, "close",
                                   {"px": px, "signal": "chan10_exit",
-                                   **{k: round(v, 4) for k, v in res.items()}})
+                                   **{k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in res.items()}})
             closed.append(f"🔒 {sym} closed {res['return_pct']:+.1f}%")
             pos = None
         elif pos is not None and pos["side"] == "short" and close_daily > short_exit_px:
             res = state.close_position(conn, pos["id"], entry_fill(quote), "signal")
             state.record_decision(conn, sym, "close",
                                   {"px": px, "signal": "short_exit",
-                                   **{k: round(v, 4) for k, v in res.items()}})
+                                   **{k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in res.items()}})
             closed.append(f"🔒 {sym} closed short {res['return_pct']:+.1f}%")
             pos = None
 
@@ -413,10 +428,12 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 tp_px = None
             if tp_px and ((pos["side"] == "long" and quote["bid"] >= tp_px) or
                           (pos["side"] == "short" and quote["ask"] <= tp_px)):
-                res = state.close_position(conn, pos["id"], exit_fill(quote), "take_profit")
+                res = state.close_position(conn, pos["id"],
+                                           exit_fill(quote) if pos["side"] == "long"
+                                           else entry_fill(quote), "take_profit")
                 state.record_decision(conn, sym, "close",
                                       {"px": px, "tp_px": round(tp_px, 6),
-                                       **{k: round(v, 4) for k, v in res.items()}})
+                                       **{k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in res.items()}})
                 closed.append(f"🎯 {sym} TP {res['return_pct']:+.1f}%")
                 pos = None
 
@@ -443,8 +460,6 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 gate = f"atr_pct {atr_pct} too low (dead market)"
             elif atr_pct > PAPER_CFG["atr_pct_max"]:
                 gate = f"atr_pct {atr_pct:.1f}% too high (chaos)"
-            elif prem_z is not None and prem_z > PAPER_CFG["prem_veto_z"]:
-                gate = f"prem_z {prem_z:+.1f} risk-off (no new longs)"
             elif n_open >= PAPER_CFG["max_positions"]:
                 gate = "max_positions"
             elif new_this_cycle >= PAPER_CFG["max_new_per_cycle"]:
@@ -458,9 +473,53 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 held_gate.append(sym)
                 continue
 
+            # A review is requested only for a candidate entry. The expensive
+            # model calls run in the background so exits and other symbols are
+            # never held up. A missing, partial or opposing review blocks entry.
+            candidate_side = None
             if entry_sig:
+                candidate_side = "long"
+            elif (opinion is not None and opinion["ok"] and opinion["entry_ok"]
+                  and opinion["bias"] == "bullish"
+                  and (ai_t is None or ai_t["conviction"])
+                  and opinion["confidence"] >= PAPER_CFG["llm_confidence_min"]):
+                candidate_side = "long"
+            elif allow_shorts and short_breakdown and er_now == er_now and er_now >= PAPER_CFG["er_min"]:
+                candidate_side = "short"
+            elif (allow_shorts and opinion is not None and opinion["ok"]
+                  and opinion["entry_ok"] and opinion["bias"] == "bearish"
+                  and opinion["confidence"] >= PAPER_CFG["llm_confidence_min"]):
+                candidate_side = "short"
+            if candidate_side and PAPER_CFG["team_gate"]:
+                review_df = df if sig_i == -1 else df.iloc[:-1]
+                review = agent_team.saved_review(conn, sym, int(review_df["ts"].iloc[-1]))
+                team_result = agent_team.entry_gate(review, candidate_side)
+                if team_result == "unavailable":
+                    try:
+                        started = agent_team.start_review(state.current_account(), sym,
+                                                          review_df.copy(), source="cycle")
+                    except Exception:
+                        started = "error"
+                    state.record_decision(conn, sym, "skip",
+                                          {"why": "team_review_pending", "status": started,
+                                           "side": candidate_side})
+                    continue
+                if team_result == "blocked":
+                    state.record_decision(conn, sym, "skip",
+                                          {"why": "team_veto", "side": candidate_side,
+                                           "review_ts": review["created_at"]})
+                    continue
+                state.record_decision(conn, sym, "review",
+                                      {"why": "team_check_pass", "side": candidate_side,
+                                       "review_ts": review["created_at"]})
+
+            below_sma = close_daily < sma200_now
+            if entry_sig:
+                if prem_z is not None and prem_z > PAPER_CFG["prem_veto_z"]:
+                    state.record_decision(conn, sym, "skip",
+                                          {"why": f"prem_z {prem_z:+.1f} risk-off (no long)"})
                 # deterministic signal; LLM may veto or scale size down only
-                if opinion is not None and opinion["ok"] and not opinion["entry_ok"] and (ai_t is None or ai_t["trusted"]):
+                elif opinion is not None and opinion["ok"] and not opinion["entry_ok"] and (ai_t is None or ai_t["trusted"]):
                     state.record_decision(conn, sym, "skip",
                                           {"why": "llm_veto",
                                            "llm": opinion["summary"][:200]})
@@ -473,6 +532,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                         state.record_decision(conn, sym, "skip",
                                               {"why": "below min notional"})
                     else:
+                        if below_sma:
+                            coll = coll * 0.5  # counter-regime long: half size
                         entry_px = entry_fill(quote)
                         tp_px = entry_px * (1 + PAPER_CFG["take_profit_atr"] * atr / entry_px) if atr else None
                         state.open_position(conn, sym, "long", entry_px, coll,
@@ -498,7 +559,10 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 has_llm = conn.execute(
                     "SELECT COUNT(*) c FROM positions WHERE meta LIKE '%llm_conviction%'"
                 ).fetchone()["c"]
-                if has_llm:
+                if prem_z is not None and prem_z > PAPER_CFG["prem_veto_z"]:
+                    state.record_decision(conn, sym, "skip",
+                                          {"why": f"prem_z {prem_z:+.1f} risk-off (no long)"})
+                elif has_llm:
                     state.record_decision(conn, sym, "skip", {"why": "llm slot busy"})
                 else:
                     coll = sizing(total_equity_cash, px, atr,
@@ -551,6 +615,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                             meta={"strategy": "donchian_short",
                                                   "llm_bias": (opinion or {}).get("bias"),
                                                   "atr": atr})
+                        new_this_cycle += 1
                         state.record_decision(conn, sym, "open",
                                               {"px": px, "collateral": round(coll, 2),
                                                "atr": round(atr, 2), "path": "short_signal",
@@ -585,6 +650,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                             meta={"strategy": "llm_conviction_short",
                                                   "llm_conf": opinion["confidence"],
                                                   "atr": atr})
+                        new_this_cycle += 1
                         state.record_decision(conn, sym, "open",
                                               {"px": px, "collateral": round(coll, 2),
                                                "path": "llm_conviction_short",

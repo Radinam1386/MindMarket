@@ -128,7 +128,14 @@ def donchian_er(
 
     short_upper = df["high"].rolling(exit_n).max().shift(1)
     short_lower = df["low"].rolling(entry_n).min().shift(1)
-    short_entry = ((df["close"] < short_lower) & gate).fillna(False)
+    # mirrored regime gate: shorts ONLY below SMA200 (longs only above, via `gate`)
+    er_gate = (er >= er_min).fillna(False)
+    if sma_n is not None:
+        below = (df["close"] < df["close"].rolling(sma_n).mean().shift(1)).fillna(False)
+        short_gate = er_gate & below
+    else:
+        short_gate = er_gate
+    short_entry = ((df["close"] < short_lower) & short_gate).fillna(False)
     short_exit = (df["close"] > short_upper).fillna(False)
     return {"long_entry": long_entry, "long_exit": long_exit,
             "short_entry": short_entry, "short_exit": short_exit,

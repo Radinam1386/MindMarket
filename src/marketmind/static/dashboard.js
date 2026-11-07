@@ -190,7 +190,10 @@ function candleChart(data) {
 function decisionReason(item) {
   try {
     const detail = JSON.parse(item.detail);
-    return detail.why || detail.reason || JSON.stringify(detail);
+    const labels = {team_review_pending: "در انتظار تحلیل تیم", team_veto: "تیم با ورود مخالف است", team_check_pass: "بررسی تیم بدون مخالفت کافی", llm_veto: "تحلیلگر ورود را رد کرد", llm_veto_short: "تحلیلگر ورود فروش را رد کرد", max_positions: "سقف موقعیت‌های باز", no_signal: "سیگنالی وجود ندارد"};
+    if (item.action === "open") return `${detail.path?.includes("short") ? "ورود فروش" : "ورود خرید"} · وثیقه ${n(detail.collateral)} USDT`;
+    if (item.action === "close" || item.action === "liquidate") return `${detail.signal || detail.reason || "خروج"} · بازده ${change(detail.return_pct)}%`;
+    return labels[detail.why] || detail.why || detail.reason || detail.note || JSON.stringify(detail);
   } catch (_) {
     return item.detail || "—";
   }
@@ -271,7 +274,7 @@ function decisionRows() {
       .slice(0, 5)
       .map(
         (item) =>
-          `<tr><td>${dateTime(item.ts)}</td><td><span class="symbol">${escapeHTML(item.symbol)}</span></td><td>${badge({ open: "ورود", close: "خروج", skip: "رد شد", hold: "نگهداری", liquidate: "تسویه" }[item.action] || item.action)}</td></tr>`,
+          `<tr><td>${dateTime(item.ts)}</td><td><span class="symbol">${escapeHTML(item.symbol)}</span></td><td>${badge({ open: "ورود", close: "خروج", skip: "رد شد", hold: "نگهداری", liquidate: "تسویه", review: "بررسی تیم" }[item.action] || item.action)}<div class="quiet">${escapeHTML(decisionReason(item))}</div></td></tr>`,
       )
       .join("") ||
     '<tr><td colspan="3" class="empty">هنوز تصمیمی ثبت نشده است.</td></tr>'
@@ -302,13 +305,18 @@ async function overview(version) {
       : state.cash;
   const profit = equity == null ? null : equity - state.initial_cash;
   const last = state.decisions[0];
+  const running = auto?.running;
+  const completed = auto?.last_summary;
+  const nextCycle = state.auto_trade && auto?.scheduler_enabled && !state.halted && auto?.last_cycle_ts
+    ? auto.last_cycle_ts + (auto.interval_min || 15) * 60 : null;
   app.innerHTML =
     heading(
       "نمای حساب",
       "یک نگاه به وضعیت حساب و مسیر تصمیم‌های آزمایشی",
-      `<button class="btn" data-action="halt">${state.halted ? "ادامهٔ حساب" : "توقف حساب"}</button><button class="btn primary" data-action="run">اجرای چرخه ↖</button>`,
+      `<button class="btn" data-action="halt">${state.halted ? "ادامهٔ حساب" : "توقف حساب"}</button><button class="btn primary" data-action="run" ${running ? "disabled" : ""}>${running ? "چرخه در حال اجراست…" : "اجرای چرخه ↖"}</button>`,
     ) +
     `
+  <section class="panel cycle-summary" aria-live="polite"><div><span>وضعیت اجرا</span><strong>${running ? "در حال بررسی بازار" : completed?.status === "error" ? "آخرین اجرا ناموفق" : completed ? "آخرین اجرا پایان یافت" : "هنوز اجرایی ثبت نشده"}</strong><small>${running ? `شروع: ${dateTime(running.started_at)}` : completed ? `پایان: ${dateTime(completed.finished_at)}` : "با اجرای چرخه، وضعیت اینجا نمایش داده می‌شود."}</small></div><div><span>نتیجهٔ آخرین اجرا</span><strong>${completed?.status === "complete" ? `${n(completed.open, 0)} ورود · ${n(completed.closed, 0)} خروج` : "—"}</strong><small>معاملات آزمایشی</small></div><div><span>اجرای خودکار بعدی</span><strong>${nextCycle ? (nextCycle <= Date.now() / 1000 ? "در انتظار اجرا" : dateTime(nextCycle)) : "—"}</strong><small>${state.auto_trade ? (auto?.scheduler_enabled ? "زمان تقریبی" : "زمان‌بند سرور خاموش است") : "چرخهٔ پیوسته خاموش است"}</small></div><div><span>تیم تحلیل</span><strong>${auto?.team_gate == null ? "نامشخص" : auto.team_gate ? "فعال برای ورود" : "غیرفعال"}</strong><small>خروج‌ها مستقل بررسی می‌شوند</small></div></section>
   <div class="overview-grid"><section class="panel balance-panel"><div class="balance-head"><div><div class="control-title">آخرین ارزش ثبت‌شدهٔ حساب</div><strong class="balance-number">${n(equity)}</strong> <span class="unit">USDT</span><div class="balance-sub ${direction(profit)}">${profit == null ? "هنوز ارزش‌گذاری حساب ثبت نشده" : change(profit, 2) + " USDT نسبت به سرمایهٔ اولیه"}</div></div>${badge("آزمایشی")}</div><div class="chart-box">${chart(state.equity)}</div><div class="metric-strip"><div class="metric"><span>موجودی آزاد</span><strong>${n(state.cash)} <small class="unit">USDT</small></strong></div><div class="metric"><span>سرمایهٔ اولیه</span><strong>${n(state.initial_cash)} <small class="unit">USDT</small></strong></div><div class="metric"><span>موقعیت باز</span><strong>${state.positions.length}</strong></div><div class="metric"><span>نرخ برد معاملات بسته</span><strong>${state.stats_all.n ? state.stats_all.win + "%" : "—"}</strong></div></div></section>
   <section class="panel control-panel"><div class="panel-head"><div><h2>وضعیت معامله‌گر</h2><p>قوانین حساب آزمایشی</p></div><span class="status-dot ${state.halted ? "paused" : ""}"></span></div><div class="control-title">چرخهٔ پیوسته</div><div class="control-state">${state.auto_trade ? "روشن" : "خاموش"}</div><p class="control-copy">${state.halted ? "حساب متوقف است؛ ورودهای جدید بررسی نمی‌شوند." : state.auto_trade ? (auto?.scheduler_enabled ? `سیستم هر ${n(auto?.interval_min || 15, 0)} دقیقه شرایط بازار را بررسی می‌کند.` : "تنظیم چرخه روشن است، اما زمان‌بند سرور اجرا نمی‌شود.") : "برای بررسی خودکار شرایط بازار، چرخهٔ پیوسته را روشن کن."}</p><div class="control-details"><div class="detail-row"><span>وضعیت حساب</span><b>${state.halted ? "متوقف" : "فعال"}</b></div><div class="detail-row"><span>آخرین تصمیم</span><b>${last ? dateTime(last.ts) : "هنوز ثبت نشده"}</b></div><div class="detail-row"><span>نوع معامله</span><b>فقط آزمایشی</b></div></div><div class="action-row"><button class="btn" data-action="auto">${state.auto_trade ? "خاموش کردن" : "روشن کردن"} چرخهٔ پیوسته</button></div></section></div>
   <div class="section-head"><h2>موقعیت‌های باز</h2><span class="quiet">سود و زیان ناخالص بر اساس آخرین قیمت</span></div><section class="panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>دارایی</th><th class="numeric">قیمت ورود</th><th class="numeric">آخرین قیمت</th><th class="numeric">سود / زیان</th><th class="numeric">وثیقه</th><th class="numeric">قیمت لیکویید</th><th class="numeric">فاصله تا لیکویید</th></tr></thead><tbody>${positionsRows()}</tbody></table></div></section>
@@ -322,6 +330,7 @@ async function overview(version) {
         `<section class="panel"><div class="panel-head"><div><h2>${name}</h2><p>${stats.n} معامله بسته‌شده</p></div></div><div class="detail-row"><span>نرخ برد</span><b>${stats.n ? stats.win + "%" : "—"}</b></div><div class="detail-row"><span>میانگین بازده</span><b>${stats.n ? change(stats.exp, 2) + "%" : "—"}</b></div><div class="detail-row"><span>ضریب سود</span><b>${stats.n ? n(stats.pf) : "—"}</b></div></section>`,
     )
     .join("")}</div>`;
+  if (running) setTimeout(() => { if (version === pageVersion && currentRoute()[0] === "overview") render(); }, 4000);
 }
 async function marketPage(version) {
   app.innerHTML =
@@ -401,7 +410,7 @@ async function decisionsPage(version) {
       "جزئیات تصمیم‌های حساب آزمایشی",
       '<a class="btn" href="#/overview">بازگشت به حساب</a>',
     ) +
-    `<section class="panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>زمان</th><th>نماد</th><th>تصمیم</th><th>جزئیات</th></tr></thead><tbody>${data.decisions.map((item) => `<tr><td>${dateTime(item.ts)}</td><td><span class="symbol">${escapeHTML(item.symbol)}</span></td><td>${badge({ open: "ورود", close: "خروج", skip: "رد شد", hold: "نگهداری", liquidate: "تسویه" }[item.action] || item.action)}</td><td class="decision-text" dir="auto">${escapeHTML(decisionReason(item))}</td></tr>`).join("") || '<tr><td colspan="4" class="empty">هنوز تصمیمی ثبت نشده است.</td></tr>'}</tbody></table></div></section>`;
+    `<section class="panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>زمان</th><th>نماد</th><th>تصمیم</th><th>جزئیات</th></tr></thead><tbody>${data.decisions.map((item) => `<tr><td>${dateTime(item.ts)}</td><td><span class="symbol">${escapeHTML(item.symbol)}</span></td><td>${badge({ open: "ورود", close: "خروج", skip: "رد شد", hold: "نگهداری", liquidate: "تسویه", review: "بررسی تیم" }[item.action] || item.action)}</td><td class="decision-text" dir="auto">${escapeHTML(decisionReason(item))}</td></tr>`).join("") || '<tr><td colspan="4" class="empty">هنوز تصمیمی ثبت نشده است.</td></tr>'}</tbody></table></div></section>`;
 }
 
 async function research(version) {
@@ -441,6 +450,26 @@ async function settings(version) {
     heading("تنظیمات", "وضعیت اتصال‌ها و کنترل حساب") +
     `<div class="settings-grid"><div><h2>حساب آزمایشی</h2><p>کنترل حساب مستقل شما و اجرای دوره‌ای معاملات کاغذی.</p></div><section class="panel"><div class="setting-row"><span>وضعیت حساب</span><b>${s.halted ? "متوقف" : "فعال"}</b></div><div class="setting-row"><span>چرخهٔ پیوسته</span><b>${a.on ? "روشن" : "خاموش"}</b></div><div class="setting-row"><span>فاصلهٔ بررسی</span><b>${n(a.interval_min, 0)} دقیقه</b></div><div class="setting-row"><button class="btn" data-action="auto">${a.on ? "خاموش کردن" : "روشن کردن"} چرخه</button><button class="btn ${s.halted ? "" : "danger"}" data-action="halt">${s.halted ? "ادامهٔ حساب" : "توقف حساب"}</button></div></section></div><div class="settings-grid"><div><h2>اتصال‌ها</h2><p>وضعیت پیکربندی سرویس‌ها. اسرار نمایش داده نمی‌شوند.</p></div><section class="panel"><div class="setting-row"><span>تحلیلگر هوش مصنوعی</span>${badge(s.llm ? "پیکربندی‌شده" : "پیکربندی نشده", s.llm ? "good" : "")}</div><div class="setting-row"><span>تلگرام</span>${s.owner && s.telegram ? '<button class="btn" data-action="notify">تست اتصال</button>' : ""}${badge(s.telegram ? "پیکربندی‌شده" : "پیکربندی نشده", s.telegram ? "good" : "")}</div><div class="setting-row"><span>ورود حساب</span>${badge(s.dashboard_login ? "فعال" : "تنظیم نشده", s.dashboard_login ? "good" : "")}</div></section></div><div class="settings-grid"><div><h2>دربارهٔ این حساب</h2></div><section class="panel"><p>این حساب فقط برای معاملهٔ آزمایشی است. موجودی فرضی است و هیچ سفارش واقعی به صرافی ارسال نمی‌شود.</p></section></div>`;
 }
+async function teamPage(version) {
+  const job = await api("/api/agent-team");
+  if (version !== pageVersion) return;
+  const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "ADAUSDT", "LINKUSDT", "DOTUSDT", "DOGEUSDT"];
+  const selected = job.result?.symbol || job.symbol || "BTCUSDT";
+  const options = symbols.map((s) => `<option value="${s}" ${s === selected ? "selected" : ""}>${s}</option>`).join("");
+  const running = job.status === "running";
+  let body = '<div class="empty">هنوز تحلیل تیمی اجرا نشده است.</div>';
+  if (running) body = '<div class="empty" role="status">تیم در حال بررسی کندل‌های ذخیره‌شده است. این کار ممکن است چند دقیقه طول بکشد.</div>';
+  if (job.status === "error") body = `<div class="empty">${escapeHTML(job.detail)}</div>`;
+  if (job.status === "complete") {
+    const result = job.result;
+    const labels = {bullish: "صعودی", bearish: "نزولی", neutral: "خنثی", unknown: "نامشخص"};
+    body = `<div class="team-meta"><span>${escapeHTML(result.symbol)}</span><span>آخرین کندل: ${dateTime(result.candle_ts)}</span><span>زمان تحلیل: ${dateTime(result.created_at)}</span></div><div class="team-reports">${result.reports.map((r) => `<article class="team-report"><div><strong>${escapeHTML(r.name)}</strong> ${badge(r.status === "ok" ? labels[r.stance] || "نامشخص" : "ناموفق", r.status === "error" ? "bad" : "")}</div><p>${escapeHTML(r.summary)}</p></article>`).join("")}</div>`;
+  }
+  app.innerHTML = heading("تیم تحلیل", "۱۰ نگاه مستقل و یک جمع‌بندی بر اساس کندل‌های ذخیره‌شدهٔ والکس") +
+    `<section class="panel team-controls"><div><label for="team-symbol">نماد</label><select id="team-symbol" ${running ? "disabled" : ""}>${options}</select><button class="btn" data-action="team-run" ${running ? "disabled" : ""}>${running ? "در حال تحلیل…" : "اجرای تحلیل تیمی"}</button></div><p>تیم هنگام بررسی ورود آزمایشی نیز اجرا می‌شود و می‌تواند ورود را رد کند. خروج‌ها مستقل‌اند. هر اجرا اعتبار API مصرف می‌کند؛ زمان آخرین کندل را بررسی کنید.</p></section><section class="panel team-results"><div class="panel-head"><h2>گزارش تیم</h2></div>${body}</section>`;
+  if (running) setTimeout(() => { if (version === pageVersion && currentRoute()[0] === "team") render(); }, 4000);
+}
+
 async function render() {
   const parts = currentRoute(),
     name = parts[0],
@@ -458,6 +487,7 @@ async function render() {
     else if (name === "coin") await coinPage(version, parts[1]);
     else if (name === "decisions") await decisionsPage(version);
     else if (name === "research") await research(version);
+    else if (name === "team") await teamPage(version);
     else if (name === "logs") await logs(version);
     else if (name === "settings") await settings(version);
     else await overview(version);
@@ -489,6 +519,12 @@ app.addEventListener("click", async (event) => {
       await render();
       return;
     }
+    if (action === "team-run") {
+      const symbol = document.getElementById("team-symbol").value;
+      await post("/api/agent-team", { symbol });
+      await render();
+      return;
+    }
     if (action === "run") {
       const result = await post("/api/run");
       toast(
@@ -496,6 +532,7 @@ app.addEventListener("click", async (event) => {
           ? "چرخه شروع شد؛ نتیجه در تصمیم‌ها ثبت می‌شود."
           : result.why || "چرخه آغاز نشد.",
       );
+      await render();
     }
     if (action === "halt") {
       const status = await api("/api/settings");

@@ -51,7 +51,7 @@ def chat(system: str, user: str, temperature: float = 0.2, max_tokens: int = 800
     headers = {"Authorization": f"Bearer {cfg['api_key']}",
                "Content-Type": "application/json"}
     last = ""
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             r = httpx.post(url, json=body, headers=headers, timeout=timeout)
             if r.status_code == 200:
@@ -60,14 +60,29 @@ def chat(system: str, user: str, temperature: float = 0.2, max_tokens: int = 800
                 if content and content.strip():
                     return content
                 if choice.get("finish_reason") == "length":
-                    body["max_tokens"] = min(4000, int(body.get("max_tokens", 800)) * 2)
-                    last = f"length-capped, retrying with {body['max_tokens']}"
+                    token_param = ("max_completion_tokens" if "max_completion_tokens" in body
+                                   else "max_tokens")
+                    body[token_param] = min(4000, int(body[token_param]) * 2)
+                    last = f"length-capped, retrying with {body[token_param]}"
                     continue
                 last = "empty content"
             else:
                 last = f"HTTP {r.status_code}: {r.text[:200]}"
+                # Newer models may require the replacement for max_tokens.
+                if (r.status_code == 400 and "max_tokens" in body
+                        and "max_completion_tokens" in r.text
+                        and "max_tokens" in r.text):
+                    body["max_completion_tokens"] = body.pop("max_tokens")
+                    continue
+                if (r.status_code == 400 and "temperature" in body
+                        and "temperature" in r.text
+                        and ("unsupported" in r.text.lower()
+                             or "does not support" in r.text.lower())):
+                    body.pop("temperature")
+                    continue
                 # some proxies reject response_format; retry without it
-                if r.status_code == 400 and "response_format" in body:
+                if (r.status_code == 400 and "response_format" in body
+                        and "response_format" in r.text):
                     body.pop("response_format")
                     continue
         except httpx.HTTPError as e:

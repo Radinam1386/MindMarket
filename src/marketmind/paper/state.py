@@ -115,9 +115,15 @@ def recent_analyst(conn: sqlite3.Connection, symbol: str, limit: int = 3) -> lis
 
 def analyst_today(conn: sqlite3.Connection, symbol: str) -> bool:
     day_start = int(time.time()) - (int(time.time()) % 86400)
-    row = conn.execute("SELECT 1 FROM analyst WHERE symbol=? AND ts>=? LIMIT 1",
+    row = conn.execute("SELECT raw FROM analyst WHERE symbol=? AND ts>=? ORDER BY id DESC LIMIT 1",
                        (symbol, day_start)).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    try:
+        raw = json.loads(row["raw"] or "{}")
+        return isinstance(raw, dict) and raw.get("ok", True) is not False
+    except (ValueError, TypeError):
+        return False
 
 
 def peak_equity(conn: sqlite3.Connection) -> float:

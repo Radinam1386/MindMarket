@@ -37,8 +37,30 @@ ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
           "ADAUSDT", "LINKUSDT", "DOTUSDT", "DOGEUSDT", "USDTTMN"]
 _cache: dict = {"markets": None, "markets_ts": 0.0, "signals": {}, "signals_ts": 0.0}
 _run_lock = threading.Lock()
+_cycle_status_lock = threading.Lock()
+_active_cycles: dict[str, dict] = {}
 _login_lock = threading.Lock()
 _login_attempts: dict[str, list[float]] = {}
+
+
+def _cycle_start(account_id: str, source: str) -> None:
+    with _cycle_status_lock:
+        _active_cycles[account_id] = {"started_at": int(time.time()), "source": source}
+
+
+def _cycle_finish(account_id: str, result: dict | None, failed: bool = False) -> None:
+    with _cycle_status_lock:
+        started = _active_cycles.pop(account_id, {})
+    summary = {"status": "error" if failed or (result or {}).get("failed") else "complete",
+               "started_at": started.get("started_at"), "finished_at": int(time.time()),
+               "source": started.get("source"),
+               "open": (result or {}).get("open", 0), "closed": (result or {}).get("closed", 0)}
+    with state.use_account(account_id):
+        conn = state.connect()
+        try:
+            state.set_setting(conn, "last_cycle_summary", json.dumps(summary))
+        finally:
+            conn.close()
 
 
 @app.on_event("startup")
@@ -79,15 +101,20 @@ def _boot() -> None:
                         interval = int(runner.PAPER_CFG.get("cycle_interval_min", 15) * 60)
                         if auto and int(_t.time()) - last >= interval and _run_lock.acquire(blocking=False):
                             try:
+                                _cycle_start(user["account_id"], "auto")
                                 from . import notify
                                 res = runner.run_cycle(notify=notify.send if user["account_id"] == "owner" else None,
                                                        force=True)
+                                _cycle_finish(user["account_id"], res)
                                 conn = state.connect()
                                 state.set_setting(conn, "last_auto_cycle", str(int(_t.time())))
                                 conn.close()
                                 _cache["signals"].clear()
                                 lines = " · ".join((res.get("lines") or [])[:4])
                                 events.record("info", "scheduler", f"چرخهٔ پیوسته تمام شد: {lines[:300]}")
+                            except Exception:
+                                _cycle_finish(user["account_id"], None, failed=True)
+                                raise
                             finally:
                                 _run_lock.release()
                     except Exception as e:  # scheduler must never die
@@ -259,6 +286,52 @@ def api_signals():
     return JSONResponse(_signals())
 
 
+@app.get("/api/agent-team")
+def api_agent_team(request: Request):
+    from .paper import agent_team
+    account = request.state.user["account_id"]
+    job = agent_team.latest_job(account)
+    if job["status"] == "empty":
+        conn = state.connect()
+        try:
+            raw = state.get_setting(conn, "team_review:last")
+            if raw:
+                job = {"status": "complete", "result": json.loads(raw)}
+        finally:
+            conn.close()
+    return JSONResponse(job)
+
+
+@app.post("/api/agent-team")
+async def api_start_agent_team(request: Request):
+    import pandas as pd
+    from .paper import agent_team
+
+    try:
+        body = await request.json()
+        symbol = body.get("symbol") if isinstance(body, dict) else None
+    except ValueError:
+        symbol = None
+    if symbol not in ASSETS or symbol == "USDTTMN":
+        raise HTTPException(400, "نماد معتبر انتخاب کنید.")
+    path = CANDLES_DIR / symbol / "1D.parquet"
+    if not path.exists():
+        raise HTTPException(404, "کندل روزانه برای این نماد موجود نیست.")
+    try:
+        # Manual and automatic reviews share the latest completed daily candle.
+        frame = pd.read_parquet(path).tail(401).iloc[:-1].copy()
+        agent_team.make_context(symbol, frame)
+    except (ValueError, KeyError, OSError):
+        raise HTTPException(400, "دادهٔ روزانه برای تحلیل معتبر نیست.")
+    account = request.state.user["account_id"]
+    status = agent_team.start_review(account, symbol, frame)
+    if status == "busy":
+        raise HTTPException(409, "یک تحلیل تیمی در حال اجراست؛ کمی بعد دوباره تلاش کنید.")
+    if status == "cooldown":
+        raise HTTPException(429, "برای اجرای دوباره پنج دقیقه صبر کنید.")
+    return JSONResponse({"status": "running", "symbol": symbol}, status_code=202)
+
+
 @app.get("/api/coin/{symbol}")
 def api_coin(symbol: str, res: str = "1D", bars: int = 180):
     import pandas as pd
@@ -352,11 +425,20 @@ def api_autotrade_status():
     conn = state.connect()
     on = state.get_setting(conn, "auto_trade", "0") == "1"
     last = int(state.get_setting(conn, "last_auto_cycle", "0") or 0)
+    summary_raw = state.get_setting(conn, "last_cycle_summary")
     conn.close()
+    try:
+        last_summary = json.loads(summary_raw) if summary_raw else None
+    except (TypeError, ValueError):
+        last_summary = None
+    with _cycle_status_lock:
+        running = _active_cycles.get(state.current_account())
     return JSONResponse({"on": on,
                          "scheduler_enabled": os.environ.get("MARKETMIND_SCHEDULER") == "1",
                          "interval_min": runner.PAPER_CFG.get("cycle_interval_min", 15),
                          "last_cycle_ts": last,
+                         "running": running, "last_summary": last_summary,
+                         "team_gate": runner.PAPER_CFG["team_gate"],
                          "er_min": runner.PAPER_CFG["er_min"],
                          "llm_confidence_min": runner.PAPER_CFG["llm_confidence_min"],
                          "max_positions": runner.PAPER_CFG["max_positions"],
@@ -401,15 +483,18 @@ def api_run():
         return JSONResponse({"started": False, "why": "یک چرخه همین حالا در حال اجراست"})
 
     account_id = state.current_account()
+    _cycle_start(account_id, "manual")
 
     def go():
         with state.use_account(account_id):
             try:
                 res = runner.run_cycle(notify=notify.send if account_id == "owner" else None, force=True)
+                _cycle_finish(account_id, res)
                 _cache["signals"].clear()
                 events.record("info", "cycle", "چرخهٔ دستی تمام شد: "
                               + " · ".join((res.get("lines") or [])[:8])[:800])
             except Exception as e:
+                _cycle_finish(account_id, None, failed=True)
                 events.record("error", "cycle", f"چرخهٔ دستی شکست خورد: {e}",
                               traceback.format_exc()[-1500:])
             finally:

@@ -92,3 +92,34 @@ src/marketmind/
 tests/                 unit tests (no network)
 docs/MARKETMIND-PLAN.md  the master plan
 ```
+
+## Agent team and upstream skills
+
+The dashboard's **تیم تحلیل** page runs a review of one symbol's stored Wallex
+daily candles. Ten separate model calls examine distinct aspects of the same
+data; an eleventh call summarizes their reports. Failed roles are shown explicitly.
+For a potential paper entry, the cycle starts this review in the background and
+waits for a later cycle. A complete review matching the decision candle is required;
+three opposing specialist views veto the entry. The team can only block an entry:
+the existing sizing and risk limits still apply, and exits never wait for it.
+Set `MARKETMIND_TEAM_GATE=0` to disable this entry gate. Reviews are stored per
+account, expire after 24 hours or when the decision candle changes, and consume
+API credit. One team analysis at a time is allowed per server process; the
+five-minute cooldown is in memory. Each run may take several minutes. The candle
+timestamp is shown because stored candles need not be current. The roles do not
+have live news, SEC data or account context.
+
+The original MIT-licensed `trader-skill` package is included in
+`.claude/skills/` from commit `5189e79b9a480755a3733ac9713f5353981dbe18` of
+<https://github.com/Jakeschincariol/trader-skill>; its license is in
+`vendor/trader-skill/LICENSE`. Those Claude skills mainly target US equities;
+the dashboard uses the separate crypto-focused roles in
+`src/marketmind/paper/agent_team.py`, not the upstream skills' Python scripts.
+
+For BoxAPI, the existing `data/secrets/llm_api.json` configuration expects
+`base_url` to be `https://ai.boxapi.ir/ai` because the client appends
+`/v1/chat/completions`. The BoxAPI model ID for Luna is
+`openai/gpt-6-luna`. Keep the API key in that gitignored file (permissions
+`0600`) or use `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` when no complete
+file configuration exists. Deployments have their own secrets and must be
+configured separately.
