@@ -1,12 +1,12 @@
 # دیپلوی روی VPS اختصاصی — راهنمای بهره‌برداری
 
 این سند جایگزین مسیر لیارا برای استقرار روی سرور اختصاصی است
-(`62.60.194.78` — Ubuntu 24.04، Docker + Compose). معاملهٔ واقعی وجود ندارد؛ فقط paper.
+(`62.60.194.41` — Ubuntu 24.04، Docker + Compose). معاملهٔ واقعی وجود ندارد؛ فقط paper.
 
 ## معماری
 
 ```
-VPS 62.60.194.78
+VPS 62.60.194.41
  └─ /opt/marketmind            کلون ریپو (main)
      ├─ compose.yml            تعریف سرویس marketmind (پورت 8787)
      ├─ deploy/vps-deploy.sh   اسکریپت pull-deploy (fetch → build → up → healthcheck)
@@ -18,7 +18,7 @@ VPS 62.60.194.78
          └─ secrets/           dashboard_users.json · dashboard_session.key · llm_api.json · telegram.json (اختیاری)
 ```
 
-- **داشبورد:** `http://62.60.194.78:8787` — صفحهٔ اصلی عمومی است؛ هر حساب از `/login` وارد فضای مستقل خود می‌شود.
+- **داشبورد:** `http://62.60.194.41:8787` — صفحهٔ اصلی عمومی است؛ هر حساب از `/login` وارد فضای مستقل خود می‌شود.
 - گذرواژه‌ها به‌صورت هش در `data/secrets/dashboard_users.json` ذخیره می‌شوند. حساب اصلی همچنان از `paper.sqlite` استفاده می‌کند؛ برای هر حساب دیگر یک فایل مستقل در `data/accounts/` وجود دارد.
 - در نخستین اجرای نسخهٔ جدید، حساب قدیمی از `dashboard_login.json` یا متغیرهای `DASHBOARD_USER` و `DASHBOARD_PASSWORD` وارد می‌شود، بدون تغییر دفتر معاملات. پس از بررسی ورود، فایل قدیمی حاوی گذرواژهٔ متنی را حذف کنید.
 - هر حساب چرخه و تنظیمات جدا دارد. `MARKETMIND_SCHEDULER=1` برای اجرای خودکار حساب‌ها لازم است؛ فعال بودن چرخه به‌تنهایی کافی نیست.
@@ -37,13 +37,12 @@ docker compose exec marketmind python -m marketmind.accounts set-user USERNAME -
 ## جریان انتشار (CI/CD)
 
 1. push به `main` → گیت‌هاب اکشن تست‌ها را اجرا می‌کند (`.github/workflows/cicd.yml`).
-2. **مسیر اصلی CD:** تایمر `marketmind-deploy.timer` روی سرور هر ۵ دقیقه
-   `deploy/vps-deploy.sh` را صدا می‌زند؛ اگر `origin/main` جلو رفته باشد،
-   pull + build + restart می‌کند و `/healthz` را چک می‌کند. یعنی حداکثر ~۵ دقیقه
-   بعد از push سبز، نسخهٔ جدید روی سرور است — بدون هیچ سکریتی در گیت‌هاب.
-3. **مسیر اختیاری (دیپلوی آنی):** اگر سکرت‌های `VPS_HOST` و `VPS_SSH_KEY`
-   در Settings → Secrets → Actions ریپو ست شوند، جاب `deploy-vps` بلافاصله
-   بعد از تست سبز، همان اسکریپت را با `--force` از طریق SSH اجرا می‌کند.
+2. تایمر `marketmind-deploy.timer` روی سرور جدید `62.60.194.41` هر ۵ دقیقه
+   `deploy/vps-deploy.sh` را اجرا می‌کند. اسکریپت قبل از ساخت ایمیج، موفق بودن
+   job تست برای همان commit را از GitHub بررسی می‌کند؛ تا سبز شدن تست‌ها نسخهٔ
+   فعلی را نگه می‌دارد.
+3. پس از سبز شدن تست، سرور `main` را می‌گیرد، build و restart می‌کند و
+   `/healthz` را بررسی می‌کند. هیچ کلید SSH یا سکرتی در تنظیمات GitHub لازم نیست.
 4. دیپلوی داده‌ها را دست نمی‌زند — فقط کد/ایمیج عوض می‌شود (`data/` volume است).
 
 ## معامله‌گری پیوسته (حالت فعال)
@@ -70,7 +69,7 @@ docker compose exec marketmind python -m marketmind.accounts set-user USERNAME -
 ## دستورهای روزمره
 
 ```bash
-ssh root@62.60.194.78
+ssh root@62.60.194.41
 
 cd /opt/marketmind
 docker compose ps                       # وضعیت

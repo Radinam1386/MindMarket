@@ -1,5 +1,9 @@
 name: CI/CD
 
+# CD runs on the replacement VPS at 62.60.194.41. Its systemd timer pulls main
+# only after this workflow's `test` check succeeds; no SSH credentials are kept
+# in GitHub Actions secrets.
+
 on:
   push:
     branches: [main]
@@ -28,30 +32,3 @@ jobs:
           }
         env:
           MARKETMIND_ROOT: ${{ github.workspace }}
-
-  # Instant push-deploy over SSH. Active only when the VPS_HOST and VPS_SSH_KEY
-  # secrets are configured; otherwise the on-server pull timer
-  # (marketmind-deploy.timer → deploy/vps-deploy.sh) deploys within ~5 minutes.
-  deploy-vps:
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy to VPS over SSH
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-        if: env.VPS_HOST != '' && env.VPS_SSH_KEY != ''
-        run: |
-          mkdir -p ~/.ssh
-          install -m 600 /dev/null ~/.ssh/id_ed25519
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          ssh -i ~/.ssh/id_ed25519 "root@$VPS_HOST" "/opt/marketmind/deploy/vps-deploy.sh --force"
-
-      - name: Push deploy skipped (on-server timer is the fallback)
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-        if: env.VPS_HOST == '' || env.VPS_SSH_KEY == ''
-        run: echo "VPS_HOST / VPS_SSH_KEY secrets not set — the server-side pull timer deploys within ~5 minutes of push. Add both secrets to enable instant SSH deploys."
