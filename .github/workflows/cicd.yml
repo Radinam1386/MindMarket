@@ -32,3 +32,5 @@ jobs:
           }
         env:
           MARKETMIND_ROOT: ${{ github.workspace }}
+      - name: Build production Docker image
+        run: docker build --pull --file deploy/Dockerfile --tag marketmind:ci .

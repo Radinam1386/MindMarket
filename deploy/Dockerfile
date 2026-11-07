@@ -11,8 +11,11 @@ ENV PYTHONUNBUFFERED=1 \
 # deps first (layer cache); Iranian build hosts often reach the mirror faster
 COPY deploy/requirements.txt /app/deploy/requirements.txt
 RUN pip install --no-cache-dir -r /app/deploy/requirements.txt \
-      -i https://mirror-pypi.runflare.com/simple \
- || pip install --no-cache-dir -r /app/deploy/requirements.txt
+      -i https://pypi.tuna.tsinghua.edu.cn/simple \
+ || pip install --no-cache-dir -r /app/deploy/requirements.txt \
+      -i https://mirrors.ustc.edu.cn/pypi/web/simple \
+ || pip install --no-cache-dir -r /app/deploy/requirements.txt \
+      -i https://pypi.org/simple
 
 # app + seed data
 COPY src /app/src

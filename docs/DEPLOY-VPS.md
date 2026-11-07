@@ -36,7 +36,7 @@ docker compose exec marketmind python -m marketmind.accounts set-user USERNAME -
 
 ## جریان انتشار (CI/CD)
 
-1. push به `main` → گیت‌هاب اکشن تست‌ها را اجرا می‌کند (`.github/workflows/cicd.yml`).
+1. push به `main` → GitHub Actions تست‌ها را اجرا و ایمیج Docker تولید را build می‌کند (`.github/workflows/cicd.yml`).
 2. تایمر `marketmind-deploy.timer` روی سرور جدید `62.60.194.41` هر ۵ دقیقه
    `deploy/vps-deploy.sh` را اجرا می‌کند. اسکریپت قبل از ساخت ایمیج، موفق بودن
    job تست برای همان commit را از GitHub بررسی می‌کند؛ تا سبز شدن تست‌ها نسخهٔ
