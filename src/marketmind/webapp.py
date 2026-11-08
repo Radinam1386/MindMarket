@@ -426,6 +426,7 @@ def api_autotrade_status():
     on = state.get_setting(conn, "auto_trade", "0") == "1"
     last = int(state.get_setting(conn, "last_auto_cycle", "0") or 0)
     summary_raw = state.get_setting(conn, "last_cycle_summary")
+    profile = runner.entry_profile(conn)
     conn.close()
     try:
         last_summary = json.loads(summary_raw) if summary_raw else None
@@ -439,7 +440,10 @@ def api_autotrade_status():
                          "last_cycle_ts": last,
                          "running": running, "last_summary": last_summary,
                          "team_gate": runner.PAPER_CFG["team_gate"],
-                         "er_min": runner.PAPER_CFG["er_min"],
+                         "entry_profile": profile["name"],
+                         "max_spread_pct": profile["max_spread_pct"],
+                         "max_entries_7d": profile["max_entries_7d"],
+                         "er_min": profile["er_min"],
                          "llm_confidence_min": runner.PAPER_CFG["llm_confidence_min"],
                          "max_positions": runner.PAPER_CFG["max_positions"],
                          "leverage": runner.PAPER_CFG["leverage"],
@@ -447,8 +451,27 @@ def api_autotrade_status():
                          "vol_target_risk": runner.PAPER_CFG["vol_target_risk"],
                          "signal_mode": runner.PAPER_CFG.get("signal_mode", "closed"),
                          "max_same_side": runner.PAPER_CFG.get("max_same_side", 3),
-                         "btc_filter_shorts": runner.PAPER_CFG.get("btc_filter_shorts", False),
+                         "btc_filter_shorts": profile["btc_filter_shorts"],
                          "min_size_factor": runner.PAPER_CFG["min_size_factor"]})
+
+
+@app.post("/api/entry-profile")
+async def api_entry_profile(request: Request):
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "حالت انتخاب‌شده معتبر نیست.")
+    profile = body.get("profile") if isinstance(body, dict) else None
+    if profile not in ("standard", "active"):
+        raise HTTPException(400, "حالت انتخاب‌شده معتبر نیست.")
+    conn = state.connect()
+    try:
+        state.set_setting(conn, "paper_entry_profile", profile)
+    finally:
+        conn.close()
+    events.record("info", "risk", "حالت ورود آزمایشی تغییر کرد: " +
+                  ("فعال‌تر" if profile == "active" else "استاندارد"))
+    return JSONResponse({"profile": profile})
 
 
 @app.post("/api/autotrade")

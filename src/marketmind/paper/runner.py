@@ -93,6 +93,19 @@ PAPER_CFG["btc_filter_shorts"] = os.environ.get("MARKETMIND_BTC_FILTER_SHORTS", 
 PAPER_CFG["team_gate"] = os.environ.get("MARKETMIND_TEAM_GATE", "1") == "1"
 
 
+def entry_profile(conn) -> dict:
+    """Account-local entry settings for the paper ledger, captured once per cycle."""
+    name = state.get_setting(conn, "paper_entry_profile", "standard")
+    active = name == "active"
+    return {
+        "name": "active" if active else "standard",
+        "er_min": min(PAPER_CFG["er_min"], 0.10) if active else PAPER_CFG["er_min"],
+        "max_spread_pct": max(PAPER_CFG["max_spread_pct"], 0.50) if active else PAPER_CFG["max_spread_pct"],
+        "max_entries_7d": max(PAPER_CFG["max_entries_7d"], 8) if active else PAPER_CFG["max_entries_7d"],
+        "btc_filter_shorts": False if active else PAPER_CFG["btc_filter_shorts"],
+    }
+
+
 SLIPPAGE = 0.0005  # 0.05% adverse slippage on taker fills (pessimistic)
 
 
@@ -249,6 +262,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                     "open": 0, "closed": 0, "positions": [],
                     "lines": ["⏭ today's cycle already ran (use force to override)"]}
 
+    activity = entry_profile(conn)
     events.record("info", "cycle",
                   f"شروع چرخه (force={force}) — به‌روزرسانی کندل‌ها از والکس…")
     try:
@@ -290,7 +304,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             state.record_decision(conn, sym, "skip", {"why": "insufficient history"})
             continue
         sig = donchian_er(df, entry_n=PAPER_CFG["entry_n"], exit_n=PAPER_CFG["exit_n"],
-                          er_n=PAPER_CFG["er_n"], er_min=PAPER_CFG["er_min"],
+                          er_n=PAPER_CFG["er_n"], er_min=activity["er_min"],
                           sma_n=PAPER_CFG["sma_n"])
         # Decision bar: "closed" (default) evaluates the last COMPLETED daily bar —
         # identical to the backtest engine and golden rule #4 ("signals decide on
@@ -305,7 +319,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         short_exit_px = float(df["high"].rolling(PAPER_CFG["exit_n"]).max().shift(1).iloc[sig_i])
         gate_detail = {"mode": PAPER_CFG.get("signal_mode", "closed"),
                        "er": (round(float(er_now), 3) if er_now == er_now else None),
-                       "er_min": PAPER_CFG["er_min"],
+                       "er_min": activity["er_min"],
                        "above_sma200": bool(close_daily > sma200_now),
                        "breakout": bool(close_daily > upper_prev),
                        "breakdown": bool(close_daily < lower_prev)}
@@ -462,15 +476,15 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             short_breakdown = bool(close_daily < lower_prev)
             n_shorts = conn.execute(
                 "SELECT COUNT(*) c FROM positions WHERE side='short'").fetchone()["c"]
-            btc_ok_for_short = (not PAPER_CFG.get("btc_filter_shorts", False)) or \
+            btc_ok_for_short = (not activity["btc_filter_shorts"]) or \
                 sym == "BTCUSDT" or btc_bull is not True
 
             # v2.2 quality gates (shared by both entry paths)
             gate = None
             spread = spread_pct(quote)
             atr_pct = (atr / px * 100) if (atr and px) else None
-            if spread > PAPER_CFG["max_spread_pct"]:
-                gate = f"spread {spread:.2f}% > {PAPER_CFG['max_spread_pct']}%"
+            if spread > activity["max_spread_pct"]:
+                gate = f"spread {spread:.2f}% > {activity['max_spread_pct']}%"
             elif atr_pct is None or atr_pct < PAPER_CFG["atr_pct_min"]:
                 gate = f"atr_pct {atr_pct} too low (dead market)"
             elif atr_pct > PAPER_CFG["atr_pct_max"]:
@@ -479,8 +493,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 gate = "max_positions"
             elif new_this_cycle >= PAPER_CFG["max_new_per_cycle"]:
                 gate = "cycle budget (1 new/cycle)"
-            elif recent_entries(conn, 7) >= PAPER_CFG["max_entries_7d"]:
-                gate = "weekly budget (3/7d)"
+            elif recent_entries(conn, 7) >= activity["max_entries_7d"]:
+                gate = f"weekly budget ({activity['max_entries_7d']}/7d)"
             elif time.time() < cooldown_until(conn, sym, PAPER_CFG["cooldown_days_after_loss"]):
                 gate = f"cooldown after loss ({PAPER_CFG['cooldown_days_after_loss']}d)"
             if gate:
@@ -499,10 +513,11 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                   and (ai_t is None or ai_t["conviction"])
                   and opinion["confidence"] >= PAPER_CFG["llm_confidence_min"]):
                 candidate_side = "long"
-            elif allow_shorts and short_breakdown and er_now == er_now and er_now >= PAPER_CFG["er_min"]:
+            elif allow_shorts and short_breakdown and er_now == er_now and er_now >= activity["er_min"]:
                 candidate_side = "short"
             elif (allow_shorts and opinion is not None and opinion["ok"]
                   and opinion["entry_ok"] and opinion["bias"] == "bearish"
+                  and (ai_t is not None and ai_t["conviction"])
                   and opinion["confidence"] >= PAPER_CFG["llm_confidence_min"]):
                 candidate_side = "short"
             if candidate_side and PAPER_CFG["team_gate"]:
@@ -555,6 +570,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                             PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
                                             MARGIN_LIQ_OFFSET,
                                             meta={"strategy": "chan10+sma200",
+                                                  "entry_profile": activity["name"],
                                                   "llm_bias": (opinion or {}).get("bias"),
                                                   "llm_conf": (opinion or {}).get("confidence"),
                                                   "atr": atr,
@@ -562,6 +578,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                         new_this_cycle += 1
                         state.record_decision(conn, sym, "open",
                                               {"px": entry_px, "collateral": round(coll, 2),
+                                               "entry_profile": activity["name"],
                                                "atr": round(atr, 2), "path": "signal",
                                                "tp_px": round(tp_px, 6) if tp_px else None,
                                                "llm": (opinion or {}).get("summary", "")[:200]})
@@ -592,16 +609,18 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                             PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
                                             MARGIN_LIQ_OFFSET,
                                             meta={"strategy": "llm_conviction",
+                                                  "entry_profile": activity["name"],
                                                   "llm_conf": opinion["confidence"],
                                                   "atr": atr, "tp_px": tp_px})
                         new_this_cycle += 1
                         state.record_decision(conn, sym, "open",
                                               {"px": entry_px, "collateral": round(coll, 2),
+                                               "entry_profile": activity["name"],
                                                "path": "llm_conviction", "tp_px": round(tp_px, 6) if tp_px else None,
                                                "llm": opinion["summary"][:200]})
                         opened.append(f"🤖 {sym} open(LLM) @{entry_px:.4g} coll {coll:.1f}$ "
                                       f"conf {opinion['confidence']:.0%}")
-            elif allow_shorts and short_breakdown and er_now == er_now and er_now >= PAPER_CFG["er_min"]:
+            elif allow_shorts and short_breakdown and er_now == er_now and er_now >= activity["er_min"]:
                 # deterministic short breakdown; bullish LLM opinion or a bullish
                 # BTC market regime vetoes (no counter-trend shorts)
                 if not btc_ok_for_short:
@@ -628,16 +647,19 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                             PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
                                             MARGIN_LIQ_OFFSET,
                                             meta={"strategy": "donchian_short",
+                                                  "entry_profile": activity["name"],
                                                   "llm_bias": (opinion or {}).get("bias"),
                                                   "atr": atr})
                         new_this_cycle += 1
                         state.record_decision(conn, sym, "open",
                                               {"px": px, "collateral": round(coll, 2),
+                                               "entry_profile": activity["name"],
                                                "atr": round(atr, 2), "path": "short_signal",
                                                "llm": (opinion or {}).get("summary", "")[:200]})
                         opened.append(f"🔻 {sym} open(short) @{px:.4g} coll {coll:.1f}$")
             elif (allow_shorts and opinion is not None and opinion["ok"]
                   and opinion["entry_ok"] and opinion["bias"] == "bearish"
+                  and (ai_t is not None and ai_t["conviction"])
                   and opinion["confidence"] >= PAPER_CFG["llm_confidence_min"]):
                 # LLM-conviction short: half cap, one slot, tagged for scoring
                 has_llm = conn.execute(
@@ -663,11 +685,13 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                             PAPER_CFG["leverage"], MARGIN_LIQ_FRAC,
                                             MARGIN_LIQ_OFFSET,
                                             meta={"strategy": "llm_conviction_short",
+                                                  "entry_profile": activity["name"],
                                                   "llm_conf": opinion["confidence"],
                                                   "atr": atr})
                         new_this_cycle += 1
                         state.record_decision(conn, sym, "open",
                                               {"px": px, "collateral": round(coll, 2),
+                                               "entry_profile": activity["name"],
                                                "path": "llm_conviction_short",
                                                "llm": opinion["summary"][:200]})
                         opened.append(f"🤖 {sym} open(LLM short) @{px:.4g} coll {coll:.1f}$ "

@@ -77,6 +77,16 @@ ledger under `data/accounts/`. To create or update users, run the interactive
 Passwords are prompted for and stored as salted hashes. Automated cycles for all
 accounts require `MARKETMIND_SCHEDULER=1` on the server.
 
+The overview lets each paper account switch between its standard entry profile
+and an opt-in more active profile. The active profile sets the spread ceiling to
+at least 0.50%, uses an ER threshold of at most 0.10, sets the weekly entry cap
+to at least eight entries per seven days,
+and does not veto shorts solely because BTC is above its long-term average. It
+keeps the existing position sizing, stops, position limits and team gate. These
+settings increase trading costs and risk and do not guarantee entries or profits.
+Each position records the selected entry profile in its metadata. Changes apply
+on the next cycle and can be reversed from the overview.
+
 ## Project layout
 
 ```

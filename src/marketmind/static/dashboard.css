@@ -853,3 +853,9 @@ input:focus-visible {
 .cycle-reasons p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.9; }
 .cycle-reasons a { white-space: nowrap; font-size: 12px; }
 @media (max-width: 600px) { .cycle-reasons { align-items: start; flex-direction: column; } }
+
+.paper-profile { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+.paper-profile strong { font-size: 14px; }
+.paper-profile p { color: var(--muted); font-size: 12px; line-height: 1.9; margin: 7px 0 0; }
+.paper-profile .btn { flex-shrink: 0; }
+@media (max-width: 600px) { .paper-profile { align-items: start; flex-direction: column; } }
