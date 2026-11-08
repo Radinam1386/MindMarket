@@ -97,6 +97,8 @@ def analyze(symbol: str, df: pd.DataFrame, prem_z: float | None,
         raw = llm.chat(SYSTEM, build_context(symbol, df, prem_z, position, cfg, memory),
                        temperature=0.2, max_tokens=1500)
         data = llm.parse_json_loose(raw)
+        if not isinstance(data, dict):
+            raise ValueError("analyst response is not a JSON object")
         bias = data.get("bias", "neutral")
         if bias not in ("bullish", "bearish", "neutral"):
             bias = "neutral"
@@ -105,7 +107,7 @@ def analyze(symbol: str, df: pd.DataFrame, prem_z: float | None,
         return {
             "bias": bias,
             "confidence": conf,
-            "entry_ok": bool(data.get("entry_ok", False)),
+            "entry_ok": data.get("entry_ok") is True,
             "size_factor": size,
             "key_levels": data.get("key_levels", {}),
             "summary": str(data.get("summary", ""))[:500],

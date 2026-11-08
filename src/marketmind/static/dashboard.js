@@ -190,10 +190,13 @@ function candleChart(data) {
 function decisionReason(item) {
   try {
     const detail = JSON.parse(item.detail);
-    const labels = {team_review_pending: "در انتظار تحلیل تیم", team_veto: "تیم با ورود مخالف است", team_check_pass: "بررسی تیم بدون مخالفت کافی", llm_veto: "تحلیلگر ورود را رد کرد", llm_veto_short: "تحلیلگر ورود فروش را رد کرد", max_positions: "سقف موقعیت‌های باز", no_signal: "سیگنالی وجود ندارد"};
+    const labels = {team_review_pending: "در انتظار تحلیل تیم", team_veto: "تیم با ورود مخالف است", team_check_pass: "بررسی تیم بدون مخالفت کافی", llm_veto: "تحلیلگر ورود را رد کرد", llm_veto_short: "تحلیلگر ورود فروش را رد کرد", max_positions: "سقف موقعیت‌های باز", no_signal: "سیگنالی وجود ندارد", "no signal": "سیگنالی وجود ندارد", btc_bullish_regime: "فیلتر روند بیت‌کوین ورود فروش را رد کرد"};
     if (item.action === "open") return `${detail.path?.includes("short") ? "ورود فروش" : "ورود خرید"} · وثیقه ${n(detail.collateral)} USDT`;
     if (item.action === "close" || item.action === "liquidate") return `${detail.signal || detail.reason || "خروج"} · بازده ${change(detail.return_pct)}%`;
-    return labels[detail.why] || detail.why || detail.reason || detail.note || JSON.stringify(detail);
+    const reason = detail.why || detail.reason || detail.note;
+    const spread = /^spread ([\d.]+)% > ([\d.]+)%$/.exec(reason || "");
+    if (spread) return `اختلاف خرید و فروش ${spread[1]}٪ از سقف ${spread[2]}٪ بیشتر بود`;
+    return labels[reason] || reason || JSON.stringify(detail);
   } catch (_) {
     return item.detail || "—";
   }
@@ -305,6 +308,15 @@ async function overview(version) {
       : state.cash;
   const profit = equity == null ? null : equity - state.initial_cash;
   const last = state.decisions[0];
+  const recentReasons = state.decisions.reduce((acc, item) => {
+    try {
+      const d = JSON.parse(item.detail);
+      if ((d.why || "").startsWith("spread ")) acc.spread++;
+      else if (d.why === "btc_bullish_regime") acc.btc++;
+      else if (item.action === "hold" && d.note === "no signal") acc.noSignal++;
+    } catch (_) {}
+    return acc;
+  }, {spread: 0, btc: 0, noSignal: 0});
   const running = auto?.running;
   const completed = auto?.last_summary;
   const nextCycle = state.auto_trade && auto?.scheduler_enabled && !state.halted && auto?.last_cycle_ts
@@ -317,6 +329,7 @@ async function overview(version) {
     ) +
     `
   <section class="panel cycle-summary" aria-live="polite"><div><span>وضعیت اجرا</span><strong>${running ? "در حال بررسی بازار" : completed?.status === "error" ? "آخرین اجرا ناموفق" : completed ? "آخرین اجرا پایان یافت" : "هنوز اجرایی ثبت نشده"}</strong><small>${running ? `شروع: ${dateTime(running.started_at)}` : completed ? `پایان: ${dateTime(completed.finished_at)}` : "با اجرای چرخه، وضعیت اینجا نمایش داده می‌شود."}</small></div><div><span>نتیجهٔ آخرین اجرا</span><strong>${completed?.status === "complete" ? `${n(completed.open, 0)} ورود · ${n(completed.closed, 0)} خروج` : "—"}</strong><small>معاملات آزمایشی</small></div><div><span>اجرای خودکار بعدی</span><strong>${nextCycle ? (nextCycle <= Date.now() / 1000 ? "در انتظار اجرا" : dateTime(nextCycle)) : "—"}</strong><small>${state.auto_trade ? (auto?.scheduler_enabled ? "زمان تقریبی" : "زمان‌بند سرور خاموش است") : "چرخهٔ پیوسته خاموش است"}</small></div><div><span>تیم تحلیل</span><strong>${auto?.team_gate == null ? "نامشخص" : auto.team_gate ? "فعال برای ورود" : "غیرفعال"}</strong><small>خروج‌ها مستقل بررسی می‌شوند</small></div></section>
+  ${state.decisions.length ? `<section class="panel cycle-reasons"><div><strong>دلیل بررسی‌های اخیر</strong><p>از ${n(state.decisions.length, 0)} تصمیم آخر: ${n(recentReasons.spread, 0)} رد به‌دلیل اسپرد، ${n(recentReasons.noSignal, 0)} بدون سیگنال و ${n(recentReasons.btc, 0)} رد با فیلتر روند بیت‌کوین.</p></div><a href="#/decisions">جزئیات تصمیم‌ها ↖</a></section>` : ""}
   <div class="overview-grid"><section class="panel balance-panel"><div class="balance-head"><div><div class="control-title">آخرین ارزش ثبت‌شدهٔ حساب</div><strong class="balance-number">${n(equity)}</strong> <span class="unit">USDT</span><div class="balance-sub ${direction(profit)}">${profit == null ? "هنوز ارزش‌گذاری حساب ثبت نشده" : change(profit, 2) + " USDT نسبت به سرمایهٔ اولیه"}</div></div>${badge("آزمایشی")}</div><div class="chart-box">${chart(state.equity)}</div><div class="metric-strip"><div class="metric"><span>موجودی آزاد</span><strong>${n(state.cash)} <small class="unit">USDT</small></strong></div><div class="metric"><span>سرمایهٔ اولیه</span><strong>${n(state.initial_cash)} <small class="unit">USDT</small></strong></div><div class="metric"><span>موقعیت باز</span><strong>${state.positions.length}</strong></div><div class="metric"><span>نرخ برد معاملات بسته</span><strong>${state.stats_all.n ? state.stats_all.win + "%" : "—"}</strong></div></div></section>
   <section class="panel control-panel"><div class="panel-head"><div><h2>وضعیت معامله‌گر</h2><p>قوانین حساب آزمایشی</p></div><span class="status-dot ${state.halted ? "paused" : ""}"></span></div><div class="control-title">چرخهٔ پیوسته</div><div class="control-state">${state.auto_trade ? "روشن" : "خاموش"}</div><p class="control-copy">${state.halted ? "حساب متوقف است؛ ورودهای جدید بررسی نمی‌شوند." : state.auto_trade ? (auto?.scheduler_enabled ? `سیستم هر ${n(auto?.interval_min || 15, 0)} دقیقه شرایط بازار را بررسی می‌کند.` : "تنظیم چرخه روشن است، اما زمان‌بند سرور اجرا نمی‌شود.") : "برای بررسی خودکار شرایط بازار، چرخهٔ پیوسته را روشن کن."}</p><div class="control-details"><div class="detail-row"><span>وضعیت حساب</span><b>${state.halted ? "متوقف" : "فعال"}</b></div><div class="detail-row"><span>آخرین تصمیم</span><b>${last ? dateTime(last.ts) : "هنوز ثبت نشده"}</b></div><div class="detail-row"><span>نوع معامله</span><b>فقط آزمایشی</b></div></div><div class="action-row"><button class="btn" data-action="auto">${state.auto_trade ? "خاموش کردن" : "روشن کردن"} چرخهٔ پیوسته</button></div></section></div>
   <div class="section-head"><h2>موقعیت‌های باز</h2><span class="quiet">سود و زیان ناخالص بر اساس آخرین قیمت</span></div><section class="panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>دارایی</th><th class="numeric">قیمت ورود</th><th class="numeric">آخرین قیمت</th><th class="numeric">سود / زیان</th><th class="numeric">وثیقه</th><th class="numeric">قیمت لیکویید</th><th class="numeric">فاصله تا لیکویید</th></tr></thead><tbody>${positionsRows()}</tbody></table></div></section>

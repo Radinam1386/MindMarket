@@ -847,3 +847,9 @@ input:focus-visible {
 .cycle-summary strong { font-size: 14px; line-height: 1.6; }
 @media (max-width: 850px) { .cycle-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 420px) { .cycle-summary { grid-template-columns: 1fr; } }
+
+.cycle-reasons { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.cycle-reasons strong { font-size: 14px; }
+.cycle-reasons p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.9; }
+.cycle-reasons a { white-space: nowrap; font-size: 12px; }
+@media (max-width: 600px) { .cycle-reasons { align-items: start; flex-direction: column; } }

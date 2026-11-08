@@ -182,21 +182,32 @@ def cooldown_until(conn, symbol: str, days: int) -> int:
     return 0
 
 
-def ai_trust(conn, df: pd.DataFrame, min_acc: float, window: int = 10) -> dict:
-    """Directional accuracy of the analyst's last opinions vs realized 3-day moves.
-    None = not enough samples (trust allowed but conviction off)."""
+def ai_trust(conn, df: pd.DataFrame, min_acc: float, window: int = 10,
+             *, symbol: str) -> dict:
+    """Score mature, same-symbol opinions against their next three closed bars."""
+    insufficient = {"accuracy": None, "n": 0, "trusted": False, "conviction": False}
+    # Intraday snapshots are not stored, so a forming bar's historical price
+    # cannot be reconstructed accurately after the bar closes.
+    if PAPER_CFG.get("signal_mode", "closed") == "live":
+        return insufficient
     rows = [dict(r) for r in conn.execute(
-        "SELECT ts, bias, confidence FROM analyst ORDER BY id DESC LIMIT ?", (window,))]
+        "SELECT ts, bias, confidence FROM analyst WHERE symbol=? ORDER BY id DESC LIMIT ?",
+        (symbol, window))]
     scored = []
-    now_px = float(df["close"].iloc[-1])
     for r in rows:
-        hist = df[df["ts"] <= r["ts"] + 3 * 86400]
-        if hist.empty:
+        # At opinion time, the current daily bar is not yet complete.
+        start = df[df["ts"] <= r["ts"] - 86400].tail(1)
+        if start.empty:
             continue
-        then_px = float(hist["close"].iloc[-1])
-        if then_px <= 0:
+        start_ts = int(start["ts"].iloc[0])
+        end = df[df["ts"] == start_ts + 3 * 86400]
+        if end.empty:
             continue
-        moved = (now_px / then_px - 1) * 100
+        start_px = float(start["close"].iloc[0])
+        end_px = float(end["close"].iloc[-1])
+        if start_px <= 0 or end_px <= 0:
+            continue
+        moved = (end_px / start_px - 1) * 100
         said_up = r["bias"] == "bullish"
         went_up = moved > 0
         if r["bias"] != "neutral" and abs(moved) > 0.5:  # only score meaningful calls
@@ -265,7 +276,6 @@ def run_cycle(notify=None, force: bool = False) -> dict:
             btc_bull = bool(btc_close > btc_sma)
     btc_regime_fa = "نامشخص" if btc_bull is None else ("گاوی" if btc_bull else "نزولی")
     new_this_cycle = 0
-    ai_t = None  # analyst trust computed per-symbol below
 
     # Check existing positions before spending time on new-entry analysis.
     positioned = {r["symbol"] for r in conn.execute("SELECT symbol FROM positions")}
@@ -286,6 +296,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
         # identical to the backtest engine and golden rule #4 ("signals decide on
         # bar close; execution at the next open"). "live" evaluates the forming bar.
         sig_i = -1 if PAPER_CFG.get("signal_mode", "closed") == "live" else -2
+        analysis_df = df if sig_i == -1 else df.iloc[:-1]
         close_daily = float(df["close"].iloc[sig_i])
         er_now = efficiency_ratio(df["close"], PAPER_CFG["er_n"]).iloc[sig_i]
         sma200_now = float(df["close"].rolling(PAPER_CFG["sma_n"]).mean().shift(1).iloc[sig_i])
@@ -314,6 +325,7 @@ def run_cycle(notify=None, force: bool = False) -> dict:
 
         # 0) LLM analyst opinion (cached per day; memory of its past calls)
         opinion = None
+        ai_t = None
         if PAPER_CFG["use_llm"] and pos is None:
             if state.analyst_today(conn, sym):
                 rows = state.recent_analyst(conn, sym, 1)
@@ -331,14 +343,15 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                                "ok": True, "cached": True}
             else:
                 memory = []
-                now_px = float(df["close"].iloc[-1])
+                now_px = float(analysis_df["close"].iloc[-1])
                 for r in state.recent_analyst(conn, sym, 3):
-                    hist = df[df["ts"] <= r["ts"] + 86400]
+                    cutoff = r["ts"] if sig_i == -1 else r["ts"] - 86400
+                    hist = analysis_df[analysis_df["ts"] <= cutoff]
                     then_px = float(hist["close"].iloc[-1]) if len(hist) else now_px
                     memory.append({"date": r["ts"], "bias": r["bias"],
                                    "confidence": r["confidence"],
                                    "outcome_pct": round((now_px / then_px - 1) * 100, 1)})
-                opinion = analyst.analyze(sym, df, prem_z, dict(pos) if pos else None,
+                opinion = analyst.analyze(sym, analysis_df, prem_z, dict(pos) if pos else None,
                                           {"entry_sig": entry_sig, "exit_sig": exit_sig,
                                            "portfolio": {"n_open": int(conn.execute(
                                                "SELECT COUNT(*) c FROM positions").fetchone()["c"]),
@@ -349,7 +362,9 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 if not opinion.get("ok"):
                     events.record("warn", "llm",
                                   f"{sym}: تحلیل AI ناموفق — {opinion.get('summary', '')[:200]}")
-                ai_t = ai_trust(conn, df, PAPER_CFG["ai_trust_min_accuracy"])
+            if opinion and opinion.get("ok"):
+                ai_t = ai_trust(conn, analysis_df, PAPER_CFG["ai_trust_min_accuracy"],
+                                symbol=sym)
 
         # 1) liquidation watch (deterministic, always)
         if pos is not None:
