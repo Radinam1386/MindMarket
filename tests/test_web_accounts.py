@@ -119,3 +119,23 @@ def test_manual_cycle_uses_request_account_in_background(clients, monkeypatch):
     assert login(owner_client, 'owner', 'old-pass').status_code == 200
     assert owner_client.get('/api/state').json()['decisions'] == []
     assert guest_client.get('/api/state').json()['decisions'][0]['symbol'] == 'ETHUSDT'
+
+
+def test_dashboard_asset_versions_change_with_content(clients, tmp_path, monkeypatch):
+    owner, _, _, _ = clients
+    assert login(owner, 'owner', 'old-pass').status_code == 200
+    assets = tmp_path / 'static'
+    assets.mkdir()
+    (assets / 'app.html').write_text('<link href="/static/dashboard.css"><script src="/static/dashboard.js"></script>')
+    (assets / 'dashboard.css').write_text('body { color: black; }')
+    (assets / 'dashboard.js').write_text('const version = 1;')
+    monkeypatch.setattr(webapp, 'STATIC', assets)
+    first = owner.get('/app')
+    assert first.status_code == 200 and first.headers['cache-control'] == 'no-store'
+    import re
+    js_version = re.search(r'/static/dashboard\.js\?v=([0-9a-f]+)', first.text).group(1)
+    css_version = re.search(r'/static/dashboard\.css\?v=([0-9a-f]+)', first.text).group(1)
+    (assets / 'dashboard.js').write_text('const version = 2;')
+    second = owner.get('/app')
+    assert f'/static/dashboard.js?v={js_version}' not in second.text
+    assert f'/static/dashboard.css?v={css_version}' in second.text

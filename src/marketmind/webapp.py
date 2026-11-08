@@ -13,6 +13,7 @@ No external CDNs — everything vanilla.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import threading
 import time
@@ -21,7 +22,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import accounts, events
@@ -617,4 +618,8 @@ def login_page():
 
 @app.get("/app")
 def dashboard():
-    return FileResponse(STATIC / "app.html")
+    html = (STATIC / "app.html").read_text(encoding="utf-8")
+    for name in ("dashboard.js", "dashboard.css"):
+        version = hashlib.sha256((STATIC / name).read_bytes()).hexdigest()[:12]
+        html = html.replace(f"/static/{name}", f"/static/{name}?v={version}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
