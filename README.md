@@ -86,6 +86,8 @@ keeps the existing position sizing, stops, position limits and team gate. These
 settings increase trading costs and risk and do not guarantee entries or profits.
 Each position records the selected entry profile in its metadata. Changes apply
 on the next cycle and can be reversed from the overview.
+The account-local `paper_unlimited_weekly` setting removes the weekly cap in
+either profile; it does not change any other account or the other entry gates.
 
 ## Project layout
 

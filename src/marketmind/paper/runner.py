@@ -97,11 +97,13 @@ def entry_profile(conn) -> dict:
     """Account-local entry settings for the paper ledger, captured once per cycle."""
     name = state.get_setting(conn, "paper_entry_profile", "standard")
     active = name == "active"
+    unlimited_weekly = state.get_setting(conn, "paper_unlimited_weekly", "0") == "1"
     return {
         "name": "active" if active else "standard",
         "er_min": min(PAPER_CFG["er_min"], 0.10) if active else PAPER_CFG["er_min"],
         "max_spread_pct": max(PAPER_CFG["max_spread_pct"], 0.50) if active else PAPER_CFG["max_spread_pct"],
-        "max_entries_7d": max(PAPER_CFG["max_entries_7d"], 8) if active else PAPER_CFG["max_entries_7d"],
+        "max_entries_7d": (None if unlimited_weekly else
+                           max(PAPER_CFG["max_entries_7d"], 8) if active else PAPER_CFG["max_entries_7d"]),
         "btc_filter_shorts": False if active else PAPER_CFG["btc_filter_shorts"],
     }
 
@@ -493,7 +495,8 @@ def run_cycle(notify=None, force: bool = False) -> dict:
                 gate = "max_positions"
             elif new_this_cycle >= PAPER_CFG["max_new_per_cycle"]:
                 gate = "cycle budget (1 new/cycle)"
-            elif recent_entries(conn, 7) >= activity["max_entries_7d"]:
+            elif (activity["max_entries_7d"] is not None and
+                  recent_entries(conn, 7) >= activity["max_entries_7d"]):
                 gate = f"weekly budget ({activity['max_entries_7d']}/7d)"
             elif time.time() < cooldown_until(conn, sym, PAPER_CFG["cooldown_days_after_loss"]):
                 gate = f"cooldown after loss ({PAPER_CFG['cooldown_days_after_loss']}d)"

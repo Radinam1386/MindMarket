@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -24,6 +25,10 @@ def test_profiles_are_account_scoped_and_do_not_mutate_shared_config(tmp_path, m
         active = runner.entry_profile(conn)
         assert active == {'name': 'active', 'er_min': .10, 'max_spread_pct': .5,
                           'max_entries_7d': 8, 'btc_filter_shorts': False}
+        state.set_setting(conn, 'paper_unlimited_weekly', '1')
+        assert runner.entry_profile(conn)['max_entries_7d'] is None
+        state.set_setting(conn, 'paper_entry_profile', 'standard')
+        assert runner.entry_profile(conn)['max_entries_7d'] is None
         conn.close()
     with state.use_account(other):
         conn = state.connect()
@@ -51,12 +56,17 @@ def test_profile_api_requires_auth_validates_and_isolates_users(tmp_path, monkey
     for client, username in ((owner, 'owner'), (guest, 'guest')):
         assert client.post('/api/login', json={'username': username, 'password': 'password'}).status_code == 200
     assert owner.post('/api/entry-profile', json={'profile': 'unsafe'}).status_code == 400
+    with state.use_account('owner'):
+        conn = state.connect()
+        state.set_setting(conn, 'paper_unlimited_weekly', '1')
+        conn.close()
     assert owner.post('/api/entry-profile', json={'profile': 'active'}).json()['profile'] == 'active'
     a, b = owner.get('/api/autotrade').json(), guest.get('/api/autotrade').json()
-    assert (a['entry_profile'], a['max_spread_pct'], a['er_min'], a['max_entries_7d']) == ('active', .5, .1, 8)
+    assert (a['entry_profile'], a['max_spread_pct'], a['er_min'], a['max_entries_7d']) == ('active', .5, .1, None)
     assert b['entry_profile'] == 'standard' and b['max_spread_pct'] == .15
     assert owner.post('/api/entry-profile', json={'profile': 'standard'}).status_code == 200
-    assert owner.get('/api/autotrade').json()['entry_profile'] == 'standard'
+    restored = owner.get('/api/autotrade').json()
+    assert restored['entry_profile'] == 'standard' and restored['max_entries_7d'] is None
 
 
 def test_active_profile_allows_candidate_after_spread_and_regime_checks(tmp_path, monkeypatch):
@@ -86,7 +96,23 @@ def test_active_profile_allows_candidate_after_spread_and_regime_checks(tmp_path
     conn = state.connect()
     assert conn.execute('SELECT COUNT(*) FROM positions').fetchone()[0] == 0
     assert 'spread' in conn.execute("SELECT detail FROM decisions WHERE symbol='XRPUSDT' ORDER BY id DESC LIMIT 1").fetchone()[0]
+    # Even after more than the old eight-entry limit, the active profile may
+    # enter when every other gate permits it.
+    now = int(time.time())
+    for _ in range(9):
+        conn.execute("INSERT INTO trades (symbol,side,entry_ts,exit_ts,entry_px,exit_px,qty,"
+                     "collateral,leverage,interest,fees,return_pct,close_reason,meta) "
+                     "VALUES ('OTHER','long',?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (now-60, now-30, 100., 101., 1., 30., 3., 0., 0., 1., 'signal', '{}'))
+    conn.commit()
+    # The standard profile still enforces its own weekly cap.
+    runner.PAPER_CFG['max_spread_pct'] = .5
+    runner.run_cycle(force=True)
+    reason = conn.execute("SELECT detail FROM decisions WHERE symbol='XRPUSDT' ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert 'weekly budget (3/7d)' in reason
+    runner.PAPER_CFG['max_spread_pct'] = .15
     state.set_setting(conn, 'paper_entry_profile', 'active')
+    state.set_setting(conn, 'paper_unlimited_weekly', '1')
     conn.close()
     runner.run_cycle(force=True)
     conn = state.connect()
